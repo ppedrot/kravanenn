@@ -1,0 +1,5 @@
+[package]
+
+name = "rust-coq"
+version = "0.0.1"
+authors = [ "Pierre-Marie Pédrot <pierre-marie.pedrot@inria.fr>" ]
