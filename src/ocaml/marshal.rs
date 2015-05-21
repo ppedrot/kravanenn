@@ -235,7 +235,7 @@ fn parse_object (file : &mut File) -> Result<Option<Object>> {
   }
 }
 
-fn print_header(h : Header) {
+pub fn print_header(h : Header) {
   println!("Magic {}", h.magic);
   println!("Length {}", h.length);
   println!("Objects {}", h.objects);
@@ -243,7 +243,7 @@ fn print_header(h : Header) {
   println!("Size64 {}", h.size64);
 }
 
-fn print_object(obj : Object) {
+pub fn print_object(obj : Object) {
   match obj {
     Object::Int (i) => println!("INT {}", i),
     Object::Block (tag, len) => println!("BLOCK {}::{}", tag, len),
@@ -271,7 +271,7 @@ fn rebuild_stack(stack : &mut Vec<BackPointer>, mem : &mut[Obj]) {
         top.object.capacity() == top.object.len()
       };
       if is_full {
-        println!("Popping");
+//         println!("Popping");
         let top = match stack.pop() {
           None => panic!("Bad object"),
           Some (top) => top
@@ -309,7 +309,7 @@ pub fn read_file (s : &str) -> Result<ObjRepr>{
     stack.push(root);
   }
   while cur < header.objects {
-    println!("{:?}", stack);
+//     println!("{:?}", stack);
     // Retrieve the header of the object
     let obj = try!(parse_object(&mut f));
     let obj = match obj {
