@@ -235,7 +235,7 @@ fn parse_object (file : &mut File) -> Result<Option<Object>> {
   }
 }
 
-pub fn print_header(h : Header) {
+fn print_header(h : Header) {
   println!("Magic {}", h.magic);
   println!("Length {}", h.length);
   println!("Objects {}", h.objects);
@@ -243,7 +243,7 @@ pub fn print_header(h : Header) {
   println!("Size64 {}", h.size64);
 }
 
-pub fn print_object(obj : Object) {
+fn print_object(obj : Object) {
   match obj {
     Object::Int (i) => println!("INT {}", i),
     Object::Block (tag, len) => println!("BLOCK {}::{}", tag, len),
