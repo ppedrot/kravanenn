@@ -294,7 +294,7 @@ pub struct ObjRepr {
   memory : Memory,
 }
 
-pub fn read_file (f : &mut File) -> Result<ObjRepr>{
+pub fn read_object (f : &mut File) -> Result<ObjRepr>{
   let header = try!(parse_header(f));
 //   print_header(header);
   let mut mem = Vec::with_capacity(header.objects);
@@ -357,5 +357,32 @@ pub fn read_file (f : &mut File) -> Result<ObjRepr>{
   };
   let entry = entry.object[0].clone();
   let ans : ObjRepr = ObjRepr { entry : entry, memory : Memory(mem) };
+  Ok(ans)
+}
+
+pub fn read_segment (f : &mut File) -> Result<ObjRepr>{
+  // Offset
+  let _ = try!(parse_byte(f));
+  // Payload
+  let mem = try!(read_object(f));
+  // Digest
+  let buf = &mut [0; 16];
+  let _ = try!(parse_bytes(f, buf, 16));
+  Ok(mem)
+}
+
+pub fn read_file (f : &mut File) -> Result<Vec<ObjRepr>>{
+  let mut ans = Vec::new();
+  // Magic number
+  let _ = try!(parse_u32(f));
+  loop {
+    // Check if there is something to read
+    let () = match f.bytes().peekable().peek() {
+      None => break,
+      Some (..) => (),
+    };
+    let segment = try!(read_segment(f));
+    ans.push(segment);
+  }
   Ok(ans)
 }
