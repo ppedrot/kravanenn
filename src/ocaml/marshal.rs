@@ -235,7 +235,7 @@ fn parse_object (file : &mut File) -> Result<Option<Object>> {
   }
 }
 
-fn print_header(h : Header) {
+fn print_header(h : &Header) {
   println!("Magic {}", h.magic);
   println!("Length {}", h.length);
   println!("Objects {}", h.objects);
@@ -296,7 +296,7 @@ pub struct ObjRepr {
 
 pub fn read_object (f : &mut File) -> Result<ObjRepr>{
   let header = try!(parse_header(f));
-//   print_header(header);
+//   print_header(&header);
   let mut mem = Vec::with_capacity(header.objects);
   let mut stack = Vec::with_capacity(1 + header.objects);
   let mut cur : usize = 0;
@@ -362,7 +362,7 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
 
 pub fn read_segment (f : &mut File) -> Result<ObjRepr>{
   // Offset
-  let _ = try!(parse_byte(f));
+  let _ = try!(parse_u32(f));
   // Payload
   let mem = try!(read_object(f));
   // Digest
@@ -374,13 +374,8 @@ pub fn read_segment (f : &mut File) -> Result<ObjRepr>{
 pub fn read_file (f : &mut File) -> Result<Vec<ObjRepr>>{
   let mut ans = Vec::new();
   // Magic number
-  let _ = try!(parse_u32(f));
+  let n = try!(parse_u32(f));
   loop {
-    // Check if there is something to read
-    let () = match f.bytes().peekable().peek() {
-      None => break,
-      Some (..) => (),
-    };
     let segment = try!(read_segment(f));
     ans.push(segment);
   }
