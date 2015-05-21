@@ -294,9 +294,8 @@ pub struct ObjRepr {
   memory : Memory,
 }
 
-pub fn read_file (s : &str) -> Result<ObjRepr>{
-  let mut f = try!(File::open(s));
-  let header = try!(parse_header(&mut f));
+pub fn read_file (f : &mut File) -> Result<ObjRepr>{
+  let header = try!(parse_header(f));
 //   print_header(header);
   let mut mem = Vec::with_capacity(header.objects);
   let mut stack = Vec::with_capacity(1 + header.objects);
@@ -311,7 +310,7 @@ pub fn read_file (s : &str) -> Result<ObjRepr>{
   while cur < header.objects {
 //     println!("{:?}", stack);
     // Retrieve the header of the object
-    let obj = try!(parse_object(&mut f));
+    let obj = try!(parse_object(f));
     let obj = match obj {
       None => {
         let err = Error::new(ErrorKind::InvalidInput, "Truncated object");
