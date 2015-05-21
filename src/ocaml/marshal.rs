@@ -45,6 +45,7 @@ enum Field {
   Int (i64),
   Ref (usize),
   Abs (u64),
+  Atm (u8),
 }
 
 #[derive (Debug)]
@@ -259,11 +260,12 @@ struct BackPointer {
   offset : usize,
 }
 
-fn rebuild_stack(stack : &mut Vec<BackPointer>, mem : &mut[Obj]) {
+// Return true if there is nothing more to read
+fn rebuild_stack(stack : &mut Vec<BackPointer>, mem : &mut[Obj]) -> bool {
   let mut len = stack.len();
   loop {
     // We hit the root node
-    if len == 1 { return; }
+    if len == 1 { return true; }
     // Otherwise, check if the top object is full
     else {
       let is_full = {
@@ -283,7 +285,7 @@ fn rebuild_stack(stack : &mut Vec<BackPointer>, mem : &mut[Obj]) {
           _ => panic!("Bad object"),
         };
         mem[off] = Obj::Block(tag, top.object);
-      } else { return; }
+      } else { return false; }
     }
   }
 }
@@ -296,7 +298,7 @@ pub struct ObjRepr {
 
 pub fn read_object (f : &mut File) -> Result<ObjRepr>{
   let header = try!(parse_header(f));
-//   print_header(&header);
+  print_header(&header);
   let mut mem = Vec::with_capacity(header.objects);
   let mut stack = Vec::with_capacity(1 + header.objects);
   let mut cur : usize = 0;
@@ -307,7 +309,7 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
     let root = BackPointer { object : dummy, offset : 0 };
     stack.push(root);
   }
-  while cur < header.objects {
+  loop {
 //     println!("{:?}", stack);
     // Retrieve the header of the object
     let obj = try!(parse_object(f));
@@ -320,7 +322,9 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
     };
     //
     let field = match obj {
-      Object::Block (..) | Object::String(..) => Field::Ref(cur),
+      Object::Block(tag, 0) => Field::Atm(tag),
+      Object::Block(..) => Field::Ref(cur),
+      Object::String(..) => Field::Ref(cur),
       Object::Pointer(p) => Field::Abs(p as u64),
       Object::Code(p) => Field::Abs(p as u64),
       Object::Int(n) => Field::Int(n),
@@ -332,7 +336,7 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
     }
     // Store the object in the memory or in the stack if non-scalar
     match obj {
-      Object::Block (tag, len) => {
+      Object::Block (tag, len) if len > 0 => {
         let obj = Vec::with_capacity(len);
         // This vector is a placeholder
         let blk = Obj::Block(tag, Vec::new());
@@ -348,7 +352,8 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
       _ => (),
     }
     // Clean filled up blocks
-    rebuild_stack(&mut stack, &mut mem);
+    let finished = rebuild_stack(&mut stack, &mut mem);
+    if finished { break; };
   }
 //   println!("Done.");
   let entry = match stack.pop() {
