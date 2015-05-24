@@ -336,7 +336,7 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
       Object::Block(tag, 0) => Field::Atm(tag),
       Object::Block(..) => Field::Ref(cur),
       Object::String(..) => Field::Ref(cur),
-      Object::Pointer(p) => Field::Ref(cur),
+      Object::Pointer(p) => Field::Ref(cur - p),
       Object::Code(p) => Field::Abs(p as u64),
       Object::Int(n) => Field::Int(n),
     };
