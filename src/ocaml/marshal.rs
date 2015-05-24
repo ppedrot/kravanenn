@@ -36,7 +36,7 @@ enum Object {
   Int (i64),
   Block (u8, usize),
   String (Vec<u8>),
-  Pointer (u64),
+  Pointer (usize),
   Code (u32),
 }
 
@@ -165,7 +165,7 @@ macro_rules! PTR {
     ($e:expr) => {
       {
         let i = try!($e);
-        Ok (Some (Object::Pointer (i as u64)))
+        Ok (Some (Object::Pointer (i as usize)))
       }
   };
 }
@@ -325,13 +325,14 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
       Object::Block(tag, 0) => Field::Atm(tag),
       Object::Block(..) => Field::Ref(cur),
       Object::String(..) => Field::Ref(cur),
-      Object::Pointer(p) => Field::Abs(p as u64),
+      Object::Pointer(p) => Field::Ref(cur),
       Object::Code(p) => Field::Abs(p as u64),
       Object::Int(n) => Field::Int(n),
     };
     {
       let len = stack.len();
       let top = &mut stack[len - 1];
+      assert!(top.object.len() < top.object.capacity());
       top.object.push(field);
     }
     // Store the object in the memory or in the stack if non-scalar
@@ -342,10 +343,12 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
         let blk = Obj::Block(tag, Vec::new());
         let bp = BackPointer { object : obj, offset : cur };
         stack.push(bp);
+        assert!(mem.len() < mem.capacity(), format!("{:?}", cur));
         mem.push(blk);
         cur = cur + 1;
       },
       Object::String(s) => {
+        assert!(mem.len() < mem.capacity());
         mem.push(Obj::String(s));
         cur = cur + 1;
       },
@@ -379,7 +382,7 @@ pub fn read_segment (f : &mut File) -> Result<ObjRepr>{
 pub fn read_file (f : &mut File) -> Result<Vec<ObjRepr>>{
   let mut ans = Vec::new();
   // Magic number
-  let n = try!(parse_u32(f));
+  let _ = try!(parse_u32(f));
   loop {
     let segment = try!(read_segment(f));
     ans.push(segment);
