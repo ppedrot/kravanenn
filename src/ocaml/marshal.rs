@@ -73,6 +73,17 @@ fn tag_of_int (i : u8) -> Tag {
   }
 }
 
+trait Add<T> {
+  fn add(&mut self, x : T);
+}
+
+impl <T> Add<T> for Vec<T> {
+  fn add(&mut self, x : T) {
+    assert!(self.len() < self.capacity());
+    self.push(x);
+  }
+}
+
 fn parse_byte(file : &mut File) -> Result<u8> {
   match file.bytes().next() {
     None =>
@@ -332,8 +343,7 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
     {
       let len = stack.len();
       let top = &mut stack[len - 1];
-      assert!(top.object.len() < top.object.capacity());
-      top.object.push(field);
+      top.object.add(field);
     }
     // Store the object in the memory or in the stack if non-scalar
     match obj {
@@ -343,13 +353,11 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
         let blk = Obj::Block(tag, Vec::new());
         let bp = BackPointer { object : obj, offset : cur };
         stack.push(bp);
-        assert!(mem.len() < mem.capacity(), format!("{:?}", cur));
-        mem.push(blk);
+        mem.add(blk);
         cur = cur + 1;
       },
       Object::String(s) => {
-        assert!(mem.len() < mem.capacity());
-        mem.push(Obj::String(s));
+        mem.add(Obj::String(s));
         cur = cur + 1;
       },
       _ => (),
