@@ -216,7 +216,7 @@ fn parse_object (file : &mut File) -> Result<Option<Object>> {
 //           Tag::TagDoubleArray32Little =>,
           Tag::TagBlock32 => {
             let obj = try!(parse_u32(file));
-            Ok (Some (Object::Block((obj & 0xFF) as u8, (obj >> 8) as usize)))
+            Ok (Some (Object::Block((obj & 0xFF) as u8, (obj >> 10) as usize)))
           },
           Tag::TagString8 => {
             let len = try!(parse_byte(file)) as usize;
