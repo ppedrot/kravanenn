@@ -35,7 +35,7 @@ static MAX_TAG : u8 = 0x13;
 enum Object {
   Int (i64),
   Block (u8, usize),
-  String (Vec<u8>),
+  String (Box<[u8]>),
   Pointer (usize),
   Code (u32),
 }
@@ -51,7 +51,7 @@ enum Field {
 #[derive (Debug)]
 enum Obj {
   Block (u8, Vec<Field>),
-  String (Vec<u8>),
+  String (Box<[u8]>),
 }
 
 #[allow(dead_code)]
@@ -95,7 +95,7 @@ fn parse_bytes(file : &mut File, buf : &mut [u8], len : usize) -> Result<()> {
   Ok (())
 }
 
-fn parse_string(file : &mut File, len : usize) -> Result<Vec<u8>> {
+fn parse_string(file : &mut File, len : usize) -> Result<Box<[u8]>> {
   let mut buf : Vec<u8> = std::vec::Vec::with_capacity(len);
   let mut i = 0;
   // Initialize the answer
@@ -104,7 +104,7 @@ fn parse_string(file : &mut File, len : usize) -> Result<Vec<u8>> {
     i = i + 1;
   };
   let () = try!(parse_bytes(file, &mut buf, len));
-  Ok (buf)
+  Ok (buf.into_boxed_slice())
 }
 
 fn parse_u16(file : &mut File) -> Result<u16> {
