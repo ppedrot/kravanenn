@@ -3,6 +3,8 @@ use std::io::prelude::*;
 use std::io::{Result, Error, ErrorKind};
 use std::fs::File;
 
+static MARSHAL_MAGIC : u32 = 0x8495a6be;
+
 #[allow(dead_code)]
 enum Tag {
   TagInt8,
@@ -149,6 +151,7 @@ fn parse_u64(file : &mut File) -> Result<u64> {
 
 pub fn parse_header(file: &mut File) -> Result<Header> {
   let magic = try!(parse_u32(file));
+  assert_eq!(magic, MARSHAL_MAGIC);
   let length = try!(parse_u32(file)) as usize;
   let objects = try!(parse_u32(file)) as usize;
   let size32 = try!(parse_u32(file)) as usize;
