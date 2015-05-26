@@ -1,7 +1,6 @@
 use std;
 use std::io::prelude::*;
 use std::io::{Result, Error, ErrorKind};
-use std::fs::File;
 
 static MARSHAL_MAGIC : u32 = 0x8495a6be;
 
@@ -86,7 +85,7 @@ impl <T> Add<T> for Vec<T> {
   }
 }
 
-fn parse_byte(file : &mut File) -> Result<u8> {
+fn parse_byte<T : Read>(file : &mut T) -> Result<u8> {
   match file.bytes().next() {
     None =>
       {
@@ -98,7 +97,7 @@ fn parse_byte(file : &mut File) -> Result<u8> {
   }
 }
 
-fn parse_bytes(file : &mut File, buf : &mut [u8], len : usize) -> Result<()> {
+fn parse_bytes<T : Read>(file : &mut T, buf : &mut [u8], len : usize) -> Result<()> {
   let mut i : usize = 0;
   while i < len {
     let byte = try!(parse_byte(file));
@@ -108,7 +107,7 @@ fn parse_bytes(file : &mut File, buf : &mut [u8], len : usize) -> Result<()> {
   Ok (())
 }
 
-fn parse_string(file : &mut File, len : usize) -> Result<Box<[u8]>> {
+fn parse_string<T : Read>(file : &mut T, len : usize) -> Result<Box<[u8]>> {
   let mut buf : Vec<u8> = std::vec::Vec::with_capacity(len);
   let mut i = 0;
   // Initialize the answer
@@ -120,14 +119,14 @@ fn parse_string(file : &mut File, len : usize) -> Result<Box<[u8]>> {
   Ok (buf.into_boxed_slice())
 }
 
-fn parse_u16(file : &mut File) -> Result<u16> {
+fn parse_u16<T : Read>(file : &mut T) -> Result<u16> {
   let mut buf = [0; 2];
   buf[1] = try!(parse_byte(file));
   buf[0] = try!(parse_byte(file));
   Ok (unsafe { std::mem::transmute::<[u8; 2], u16>(buf) })
 }
 
-fn parse_u32(file : &mut File) -> Result<u32> {
+fn parse_u32<T : Read>(file : &mut T) -> Result<u32> {
   let mut buf = [0; 4];
   buf[3] = try!(parse_byte(file));
   buf[2] = try!(parse_byte(file));
@@ -136,7 +135,7 @@ fn parse_u32(file : &mut File) -> Result<u32> {
   Ok (unsafe { std::mem::transmute::<[u8; 4], u32>(buf) })
 }
 
-fn parse_u64(file : &mut File) -> Result<u64> {
+fn parse_u64<T : Read>(file : &mut T) -> Result<u64> {
   let mut buf = [0; 8];
   buf[7] = try!(parse_byte(file));
   buf[6] = try!(parse_byte(file));
@@ -149,7 +148,7 @@ fn parse_u64(file : &mut File) -> Result<u64> {
   Ok (unsafe { std::mem::transmute::<[u8; 8], u64>(buf) })
 }
 
-pub fn parse_header(file: &mut File) -> Result<Header> {
+pub fn parse_header<T : Read>(file: &mut T) -> Result<Header> {
   let magic = try!(parse_u32(file));
   assert_eq!(magic, MARSHAL_MAGIC);
   let length = try!(parse_u32(file)) as usize;
@@ -193,7 +192,7 @@ macro_rules! STR {
   };
 }
 
-fn parse_object (file : &mut File) -> Result<Option<Object>> {
+fn parse_object<T : Read>(file : &mut T) -> Result<Option<Object>> {
   match file.bytes().next() {
     None => Ok (None),
     Some (Ok (data)) =>
@@ -250,24 +249,6 @@ fn parse_object (file : &mut File) -> Result<Option<Object>> {
   }
 }
 
-fn print_header(h : &Header) {
-  println!("Magic {}", h.magic);
-  println!("Length {}", h.length);
-  println!("Objects {}", h.objects);
-  println!("Size32 {}", h.size32);
-  println!("Size64 {}", h.size64);
-}
-
-fn print_object(obj : Object) {
-  match obj {
-    Object::Int (i) => println!("INT {}", i),
-    Object::Block (tag, len) => println!("BLOCK {}::{}", tag, len),
-    Object::String (..) => println!("STRING"),
-    Object::Pointer (p) => println!("POINTER {:x}", p),
-    Object::Code (p) => println!("CODE {:x}", p),
-  }
-}
-
 #[derive (Debug)]
 struct BackPointer {
   object : Vec<Field>,
@@ -310,9 +291,8 @@ pub struct ObjRepr {
   memory : Memory,
 }
 
-pub fn read_object (f : &mut File) -> Result<ObjRepr>{
+pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
   let header = try!(parse_header(f));
-  print_header(&header);
   let mut mem = Vec::with_capacity(header.objects);
   let mut stack = Vec::with_capacity(1 + header.objects);
   let mut cur : usize = 0;
@@ -379,7 +359,7 @@ pub fn read_object (f : &mut File) -> Result<ObjRepr>{
   Ok(ans)
 }
 
-pub fn read_segment (f : &mut File) -> Result<ObjRepr>{
+pub fn read_segment<T : Read>(f : &mut T) -> Result<ObjRepr>{
   // Offset
   let _ = try!(parse_u32(f));
   // Payload
@@ -390,7 +370,7 @@ pub fn read_segment (f : &mut File) -> Result<ObjRepr>{
   Ok(mem)
 }
 
-pub fn read_file (f : &mut File) -> Result<Vec<ObjRepr>>{
+pub fn read_file<T : Read>(f : &mut T) -> Result<Vec<ObjRepr>>{
   let mut ans = Vec::new();
   // Magic number
   let _ = try!(parse_u32(f));
