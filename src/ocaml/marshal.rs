@@ -94,7 +94,7 @@ macro_rules! ERROR_TRUNCATED {
   };
 }
 
-fn parse_byte<T : Read>(file : &mut T) -> Result<u8> {
+fn parse_u8<T : Read>(file : &mut T) -> Result<u8> {
   match file.bytes().next() {
     None => ERROR_TRUNCATED!(),
     Some (Ok (byte)) => Ok (byte),
@@ -126,30 +126,30 @@ fn parse_string<T : Read>(file : &mut T, len : usize) -> Result<Box<[u8]>> {
 
 fn parse_u16<T : Read>(file : &mut T) -> Result<u16> {
   let mut buf = [0; 2];
-  buf[1] = try!(parse_byte(file));
-  buf[0] = try!(parse_byte(file));
+  buf[1] = try!(parse_u8(file));
+  buf[0] = try!(parse_u8(file));
   Ok (unsafe { std::mem::transmute::<[u8; 2], u16>(buf) })
 }
 
 fn parse_u32<T : Read>(file : &mut T) -> Result<u32> {
   let mut buf = [0; 4];
-  buf[3] = try!(parse_byte(file));
-  buf[2] = try!(parse_byte(file));
-  buf[1] = try!(parse_byte(file));
-  buf[0] = try!(parse_byte(file));
+  buf[3] = try!(parse_u8(file));
+  buf[2] = try!(parse_u8(file));
+  buf[1] = try!(parse_u8(file));
+  buf[0] = try!(parse_u8(file));
   Ok (unsafe { std::mem::transmute::<[u8; 4], u32>(buf) })
 }
 
 fn parse_u64<T : Read>(file : &mut T) -> Result<u64> {
   let mut buf = [0; 8];
-  buf[7] = try!(parse_byte(file));
-  buf[6] = try!(parse_byte(file));
-  buf[5] = try!(parse_byte(file));
-  buf[4] = try!(parse_byte(file));
-  buf[3] = try!(parse_byte(file));
-  buf[2] = try!(parse_byte(file));
-  buf[1] = try!(parse_byte(file));
-  buf[0] = try!(parse_byte(file));
+  buf[7] = try!(parse_u8(file));
+  buf[6] = try!(parse_u8(file));
+  buf[5] = try!(parse_u8(file));
+  buf[4] = try!(parse_u8(file));
+  buf[3] = try!(parse_u8(file));
+  buf[2] = try!(parse_u8(file));
+  buf[1] = try!(parse_u8(file));
+  buf[0] = try!(parse_u8(file));
   Ok (unsafe { std::mem::transmute::<[u8; 8], u64>(buf) })
 }
 
@@ -213,11 +213,11 @@ fn parse_object<T : Read>(file : &mut T) -> Result<Option<Object>> {
         STR!(file, len)
       } else {
         match tag_of_int(data) {
-          Tag::TagInt8 => INT!(parse_byte(file)),
+          Tag::TagInt8 => INT!(parse_u8(file)),
           Tag::TagInt16 => INT!(parse_u16(file)),
           Tag::TagInt32 => INT!(parse_u32(file)),
           Tag::TagInt64 => INT!(parse_u64(file)),
-          Tag::TagShared8 => PTR!(parse_byte(file)),
+          Tag::TagShared8 => PTR!(parse_u8(file)),
           Tag::TagShared16 => PTR!(parse_u16(file)),
           Tag::TagShared32 => PTR!(parse_u32(file)),
 //           Tag::TagDoubleArray32Little =>,
@@ -226,7 +226,7 @@ fn parse_object<T : Read>(file : &mut T) -> Result<Option<Object>> {
             Ok (Some (Object::Block((obj & 0xFF) as u8, (obj >> 10) as usize)))
           },
           Tag::TagString8 => {
-            let len = try!(parse_byte(file)) as usize;
+            let len = try!(parse_u8(file)) as usize;
             STR!(file, len)
           },
           Tag::TagString32 => {
