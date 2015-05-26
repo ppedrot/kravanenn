@@ -100,9 +100,9 @@ fn parse_byte<T : Read>(file : &mut T) -> Result<u8> {
 fn parse_bytes<T : Read>(file : &mut T, buf : &mut [u8], len : usize) -> Result<()> {
   let mut i : usize = 0;
   while i < len {
-    let byte = try!(parse_byte(file));
-    buf[i] = byte;
-    i = i + 1;
+    let buf = &mut buf[i..len];
+    let size = try!(file.read(buf));
+    i = i + size;
   }
   Ok (())
 }
