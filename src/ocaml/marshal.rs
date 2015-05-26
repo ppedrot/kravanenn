@@ -268,11 +268,7 @@ fn rebuild_stack(stack : &mut Vec<BackPointer>, mem : &mut[Obj]) -> bool {
         top.object.capacity() == top.object.len()
       };
       if is_full {
-//         println!("Popping");
-        let top = match stack.pop() {
-          None => panic!("Bad object"),
-          Some (top) => top
-        };
+        let top = stack.pop().unwrap();
         len = len - 1;
         let off = top.offset;
         let tag = match mem[off] {
@@ -350,14 +346,8 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
     if finished { break; };
   }
 //   println!("Done.");
-  let mut entry = match stack.pop() {
-    None => panic!("Bad object"),
-    Some (obj) => obj,
-  };
-  let entry = match entry.object.pop() {
-    None => panic!("Bad object"),
-    Some (obj) => obj,
-  };
+  let mut entry = stack.pop().unwrap();
+  let entry = entry.object.pop().unwrap();
   let ans : ObjRepr = ObjRepr { entry : entry, memory : Memory(mem) };
   Ok(ans)
 }
