@@ -350,11 +350,14 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
     if finished { break; };
   }
 //   println!("Done.");
-  let entry = match stack.pop() {
+  let mut entry = match stack.pop() {
     None => panic!("Bad object"),
     Some (obj) => obj,
   };
-  let entry = entry.object[0].clone();
+  let entry = match entry.object.pop() {
+    None => panic!("Bad object"),
+    Some (obj) => obj,
+  };
   let ans : ObjRepr = ObjRepr { entry : entry, memory : Memory(mem) };
   Ok(ans)
 }
