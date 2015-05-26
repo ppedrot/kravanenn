@@ -85,13 +85,18 @@ impl <T> Add<T> for Vec<T> {
   }
 }
 
-fn parse_byte<T : Read>(file : &mut T) -> Result<u8> {
-  match file.bytes().next() {
-    None =>
+macro_rules! ERROR_TRUNCATED {
+    () => {
       {
         let err = Error::new(ErrorKind::InvalidInput, "Truncated object");
-        Err(err)
+        return Err(err)
       }
+  };
+}
+
+fn parse_byte<T : Read>(file : &mut T) -> Result<u8> {
+  match file.bytes().next() {
+    None => ERROR_TRUNCATED!(),
     Some (Ok (byte)) => Ok (byte),
     Some (Err (e)) => Err (e),
   }
@@ -304,10 +309,7 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
     // Retrieve the header of the object
     let obj = try!(parse_object(f));
     let obj = match obj {
-      None => {
-        let err = Error::new(ErrorKind::InvalidInput, "Truncated object");
-        return Err(err);
-      },
+      None => { ERROR_TRUNCATED!() },
       Some (obj) => obj,
     };
     //
