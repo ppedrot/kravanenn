@@ -365,7 +365,7 @@ pub fn read_segment<T : Read>(f : &mut T) -> Result<ObjRepr>{
   Ok(mem)
 }
 
-pub fn read_file<T : Read>(f : &mut T) -> Result<Vec<ObjRepr>>{
+pub fn read_file<T : Read>(f : &mut T) -> Result<Box<[ObjRepr]>>{
   let mut ans = Vec::new();
   // Magic number
   let _ = try!(parse_u32(f));
@@ -375,5 +375,5 @@ pub fn read_file<T : Read>(f : &mut T) -> Result<Vec<ObjRepr>>{
     ans.push(segment);
     i = i - 1;
   }
-  Ok(ans)
+  Ok(ans.into_boxed_slice())
 }
