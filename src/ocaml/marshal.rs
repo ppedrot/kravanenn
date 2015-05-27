@@ -369,9 +369,11 @@ pub fn read_file<T : Read>(f : &mut T) -> Result<Vec<ObjRepr>>{
   let mut ans = Vec::new();
   // Magic number
   let _ = try!(parse_u32(f));
-  loop {
+  let mut i = 5;
+  while 0 < i {
     let segment = try!(read_segment(f));
     ans.push(segment);
+    i = i - 1;
   }
   Ok(ans)
 }

@@ -15,7 +15,6 @@ fn main () {
       Ok (f) => f,
     };
     let mem = ocaml::marshal::read_file(&mut file);
-    println!("{:?}", mem);
   } else {
     panic!("Invalid argument");
   }
