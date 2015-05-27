@@ -51,7 +51,7 @@ enum Field {
 
 #[derive (Debug)]
 enum Obj {
-  Block (u8, Vec<Field>),
+  Block (u8, Box<[Field]>),
   String (Box<[u8]>),
 }
 
@@ -65,7 +65,7 @@ pub struct Header {
 }
 
 #[derive (Debug)]
-pub struct Memory (pub Vec<Obj>);
+pub struct Memory (pub Box<[Obj]>);
 
 fn tag_of_int (i : u8) -> Tag {
   if MAX_TAG < i { panic!("Unknown tag {}", i); };
@@ -280,7 +280,7 @@ fn rebuild_stack(stack : &mut Vec<BackPointer>, mem : &mut[Obj]) -> bool {
           Obj::Block(tag, _) => tag,
           _ => panic!("Bad object"),
         };
-        mem[off] = Obj::Block(tag, top.object);
+        mem[off] = Obj::Block(tag, top.object.into_boxed_slice());
       } else { return false; }
     }
   }
@@ -331,7 +331,7 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
       Object::Block (tag, len) if len > 0 => {
         let obj = Vec::with_capacity(len);
         // This vector is a placeholder
-        let blk = Obj::Block(tag, Vec::new());
+        let blk = Obj::Block(tag, Box::default());
         let bp = BackPointer { object : obj, offset : cur };
         stack.push(bp);
         mem.add(blk);
@@ -350,7 +350,8 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
 //   println!("Done.");
   let mut entry = stack.pop().unwrap();
   let entry = entry.object.pop().unwrap();
-  let ans : ObjRepr = ObjRepr { entry : entry, memory : Memory(mem) };
+  let memory = Memory(mem.into_boxed_slice());
+  let ans : ObjRepr = ObjRepr { entry : entry, memory : memory };
   Ok(ans)
 }
 
