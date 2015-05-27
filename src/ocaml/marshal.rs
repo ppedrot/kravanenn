@@ -65,7 +65,7 @@ pub struct Header {
 }
 
 #[derive (Debug)]
-pub struct Memory (Vec<Obj>);
+pub struct Memory (pub Vec<Obj>);
 
 fn tag_of_int (i : u8) -> Tag {
   if MAX_TAG < i { panic!("Unknown tag {}", i); };
