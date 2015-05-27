@@ -42,7 +42,7 @@ enum Object {
 }
 
 #[derive (Clone, Debug)]
-enum Field {
+pub enum Field {
   Int (i64),
   Ref (usize),
   Abs (u64),
@@ -50,7 +50,7 @@ enum Field {
 }
 
 #[derive (Debug)]
-enum Obj {
+pub enum Obj {
   Block (u8, Box<[Field]>),
   String (Box<[u8]>),
 }
