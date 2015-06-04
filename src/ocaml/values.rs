@@ -1,63 +1,53 @@
 use std::rc::Rc;
 
-enum Value {
+pub enum Value<'a> {
   Any,
-  Fail(String),
-  Tuple(String, Vec<Rc<Value>>),
-  Sum(String, usize, Vec<Vec<Rc<Value>>>),
-  Array(Rc<Value>),
-  List(Rc<Value>),
-  Opt(Rc<Value>),
+//   Fail(&'static str),
+  Tuple(&'static str, &'a [&'a Value<'a>]),
+  Sum(&'static str, usize, &'a [&'a [Value<'a>]]),
+//   Array(Rc<Value>),
+//   List(Rc<Value>),
+//   Opt(Rc<Value>),
   Int,
   String,
-  Annot(String, Rc<Value>),
-  Dyn,
-  Fix(Box<Fn (Value) -> Value>),
+//   Annot(String, Rc<Value>),
+//   Dyn,
+//   Fix(Box<Fn (Value) -> Value>),
 }
 
-impl Value {
+static UNIT : Value<'static> = Value::Tuple ("unit", &[]);
+static BOOL : Value<'static> = Value::Sum ("bool", 2, &[]);
 
-fn tuple(name : String, v : Vec<Rc<Value>>) -> Value {
-  Value::Tuple(name, v)
-}
+impl <'a> Value<'a> {
 
-fn sum(name : String, constr : usize, v : Vec<Vec<Rc<Value>>>) -> Value {
-  Value::Sum(name, constr, v)
-}
+// fn tuple(name : &'static str, v : &'a[&'a Value<'a>]) -> Value<'a> {
+//   Value::Tuple(name, v)
+// }
 
-fn enum_(name : String, constr : usize) -> Value {
-  Value::Sum(name, constr, Vec::new())
-}
+// fn sum(name : &'static str, constr : usize, v : Vec<Vec<Rc<Value>>>) -> Value {
+//   Value::Sum(name, constr, v)
+// }
 
-fn pair(v1 : Value, v2 : Value) -> Value {
-  Value::tuple("*".to_string(), vec!(Rc::new(v1), Rc::new(v2)))
-}
+// fn enum_(name : &'static str, constr : usize) -> Value {
+//   Value::Sum(name, constr, Vec::new())
+// }
 
-fn bool_() -> Value {
-  Value::enum_("bool".to_string(), 2)
-}
+// fn pair(v1 : Value, v2 : Value) -> Value {
+//   Value::tuple("*", vec!(Rc::new(v1), Rc::new(v2)))
+// }
 
-fn ref_ (v : Rc<Value>) -> Value {
-  Value::tuple("ref".to_string(), vec!(v))
-}
+// fn ref_ (v : Rc<Value>) -> Value {
+//   Value::tuple("ref", vec!(v))
+// }
 
-fn set (e : Rc<Value>) -> Value {
-  let f = |v : Value| {
-    let v1 = Rc::new(v);
-    let v2 = v1.clone();
-    Value::Sum ("set".to_string(), 1, vec!(vec!(v1, v2)))
-  };
-  Value::Fix(Box::new(f))
-}
-
-fn map (k : Rc<Value>, e : Rc<Value>) -> Value {
-  let f = |v : Value| {
-    let v1 = Rc::new(v);
-    let v2 = v1.clone();
-    Value::Sum ("map".to_string(), 1, vec!(vec!(v1, v2)))
-  };
-  Value::Fix(Box::new(f))
-}
+// fn set (e : Rc<Value>) -> Value {
+//   let f = |v : Value| {
+//     let v1 = Rc::new(v);
+//     let v2 = v1.clone();
+//     Value::Sum ("set", 1, vec!(vec!(v1, v2)))
+//   };
+//   Value::Fix(Box::new(f))
+// }
 
 }
 

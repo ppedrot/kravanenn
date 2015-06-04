@@ -1,6 +1,9 @@
 use std;
 use std::io::prelude::*;
 use std::io::{Result, Error, ErrorKind};
+use std::ops::Deref;
+use std::fmt::{Display, LowerHex, Formatter};
+use std::{char};
 
 static MARSHAL_MAGIC : u32 = 0x8495a6be;
 
@@ -33,15 +36,37 @@ static PREFIX_SMALL_INT : u8 = 0x40;
 static PREFIX_SMALL_STRING : u8 = 0x20;
 static MAX_TAG : u8 = 0x13;
 
+pub struct RawString (Box<[u8]>);
+
+impl Deref for RawString {
+  type Target = [u8];
+  fn deref(&self) -> &[u8] {
+    let RawString(ref s) = *self;
+    s.as_ref()
+  }
+}
+
+impl Display for RawString {
+  fn fmt(&self, fmt : &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
+    let RawString(ref s) = *self;
+    for i in s.as_ref() {
+      match char::from_u32(*i as u32) {
+        None => { try!(LowerHex::fmt(i, fmt)) },
+        Some(ref c) => { try!(Display::fmt(c, fmt)) },
+      };
+    };
+    Ok(())
+  }
+}
+
 enum Object {
   Int (i64),
   Block (u8, usize),
-  String (Box<[u8]>),
+  String (RawString),
   Pointer (usize),
   Code (u32),
 }
 
-#[derive (Clone, Debug)]
 pub enum Field {
   Int (i64),
   Ref (usize),
@@ -49,22 +74,20 @@ pub enum Field {
   Atm (u8),
 }
 
-#[derive (Debug)]
 pub enum Obj {
   Block (u8, Box<[Field]>),
-  String (Box<[u8]>),
+  String (RawString),
 }
 
 #[allow(dead_code)]
 pub struct Header {
-  magic : u32,
-  length : usize,
-  objects : usize,
-  size32 : usize,
-  size64 : usize,
+  pub magic : u32,
+  pub length : usize,
+  pub objects : usize,
+  pub size32 : usize,
+  pub size64 : usize,
 }
 
-#[derive (Debug)]
 pub struct Memory (pub Box<[Obj]>);
 
 fn tag_of_int (i : u8) -> Tag {
@@ -112,7 +135,7 @@ fn parse_bytes<T : Read>(file : &mut T, buf : &mut [u8], len : usize) -> Result<
   Ok (())
 }
 
-fn parse_string<T : Read>(file : &mut T, len : usize) -> Result<Box<[u8]>> {
+fn parse_string<T : Read>(file : &mut T, len : usize) -> Result<RawString> {
   let mut buf : Vec<u8> = std::vec::Vec::with_capacity(len);
   let mut i = 0;
   // Initialize the answer
@@ -121,7 +144,7 @@ fn parse_string<T : Read>(file : &mut T, len : usize) -> Result<Box<[u8]>> {
     i = i + 1;
   };
   let () = try!(parse_bytes(file, &mut buf, len));
-  Ok (buf.into_boxed_slice())
+  Ok (RawString(buf.into_boxed_slice()))
 }
 
 fn parse_u16<T : Read>(file : &mut T) -> Result<u16> {
@@ -254,7 +277,6 @@ fn parse_object<T : Read>(file : &mut T) -> Result<Option<Object>> {
   }
 }
 
-#[derive (Debug)]
 struct BackPointer {
   object : Vec<Field>,
   offset : usize,
@@ -286,13 +308,12 @@ fn rebuild_stack(stack : &mut Vec<BackPointer>, mem : &mut[Obj]) -> bool {
   }
 }
 
-#[derive (Debug)]
 pub struct ObjRepr {
-  entry : Field,
-  memory : Memory,
+  pub entry : Field,
+  pub memory : Memory,
 }
 
-pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
+pub fn read_object<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   let header = try!(parse_header(f));
   let mut mem = Vec::with_capacity(header.objects);
   let mut stack = Vec::with_capacity(1 + header.objects);
@@ -352,10 +373,10 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<ObjRepr>{
   let entry = entry.object.pop().unwrap();
   let memory = Memory(mem.into_boxed_slice());
   let ans : ObjRepr = ObjRepr { entry : entry, memory : memory };
-  Ok(ans)
+  Ok((header, ans))
 }
 
-pub fn read_segment<T : Read>(f : &mut T) -> Result<ObjRepr>{
+pub fn read_segment<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   // Offset
   let _ = try!(parse_u32(f));
   // Payload
@@ -366,7 +387,7 @@ pub fn read_segment<T : Read>(f : &mut T) -> Result<ObjRepr>{
   Ok(mem)
 }
 
-pub fn read_file<T : Read>(f : &mut T) -> Result<Box<[ObjRepr]>>{
+pub fn read_file<T : Read>(f : &mut T) -> Result<Box<[(Header, ObjRepr)]>>{
   let mut ans = Vec::new();
   // Magic number
   let _ = try!(parse_u32(f));
