@@ -14,7 +14,7 @@ fn prompt(){
   let _ = io::stdout().flush();
 }
 
-fn loop_size(mem : &[Obj], seen : &mut[bool], ans : &mut[usize], off : usize) -> usize {
+fn loop_size(mem : &[Obj], seen : &mut[bool], cb : &mut (FnMut(usize, usize) -> ()), off : usize) -> usize {
   if seen[off] { return 0; };
   seen[off] = true;
   let mut size = 0;
@@ -25,7 +25,7 @@ fn loop_size(mem : &[Obj], seen : &mut[bool], ans : &mut[usize], off : usize) ->
       for i in 0..len {
         match args[i] {
           Field::Ref (off) => {
-            size = size + loop_size(mem, seen, ans, off);
+            size = size + loop_size(mem, seen, cb, off);
           },
           Field::Int (..) => (),
           Field::Abs (..) => (),
@@ -38,7 +38,7 @@ fn loop_size(mem : &[Obj], seen : &mut[bool], ans : &mut[usize], off : usize) ->
       size = size + 2 + len / 8;
     },
   }
-  ans[off] = size;
+  cb(off, size);
   return size;
 }
 
@@ -51,7 +51,10 @@ fn compute_size(mem : &[Obj]) -> Box<[usize]> {
     seen.push(false);
   };
   let mut ans = ans.into_boxed_slice();
-  if len != 0 { let _ = loop_size(mem, &mut seen, &mut ans, 0); };
+  {
+    let mut cb = |off, size| { ans[off] = size };
+    if len != 0 { let _ = loop_size(mem, &mut seen, &mut cb, 0); };
+  }
   ans
 }
 
