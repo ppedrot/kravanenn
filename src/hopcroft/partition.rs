@@ -58,76 +58,81 @@ pub fn new (n : usize) -> Partition {
 }
 
 /// Number of partitions held by the datastructure.
-pub fn len (p : &Partition) -> usize { Vec::len(&p.partinfo) }
+pub fn len (&self) -> usize { Vec::len(&self.partinfo) }
 
 /// Number of elements in a partition.
-pub fn size (p : &Partition, i : Set) -> usize {
+pub fn size (&self, i : Set) -> usize {
   let Set(i) = i;
-  let ref info = p.partinfo[i];
+  let ref info = self.partinfo[i];
   info.last - info.first
 }
 
 /// Return the partition an element is in.
-pub fn partition(p : &Partition, n : usize) -> Set { p.index[n] }
+pub fn partition(&self, n : usize) -> Set { self.index[n] }
 
 }
 
-// struct PartitionIter {
-//   off : usize,
-//   max : usize,
-// }
+pub struct PartitionIter {
+  off : usize,
+  max : usize,
+}
 
-// impl Iterator for PartitionIter  {
-//   fn next (&mut self) -> Option<PartitionIter> {
-//     if self.max == self.off { None } else {
-//   }
-// }
-// 
-// impl <'a> IntoIterator for &'a Partition {
-//   type Item = usize;
-//   type IntoIter = PartitionIter;
-// }
+impl Iterator for PartitionIter {
+  type Item = Set;
+  fn next (&mut self) -> Option<Set> {
+    if self.max == self.off { None } else {
+      let ans = self.off;
+      self.off = self.off + 1;
+      Some(Set(ans))
+    }
+  }
+}
+
+impl <'a> IntoIterator for &'a Partition {
+  type Item = Set;
+  type IntoIter = PartitionIter;
+  fn into_iter(self) -> PartitionIter { PartitionIter { off : 0, max : self.len() } }
+}
+
+pub struct SetIter<'a> {
+  off : usize,
+  max : usize,
+  ptr : &'a[usize],
+}
+
+impl <'a> Iterator for SetIter<'a> {
+  type Item = usize;
+  fn next (&mut self) -> Option<usize> {
+    if self.max == self.off { None } else {
+      let ans = self.ptr[self.off];
+      self.off = self.off + 1;
+      Some(ans)
+    }
+  }
+}
+
+impl <'a> Partition {
+
+pub fn class(&'a self, i : Set) -> SetIter<'a> {
+  let Set(i) = i;
+  let ref info = self.partinfo[i];
+  SetIter {
+    off : info.first,
+    max : info.last,
+    ptr : self.elements.as_ref(),
+  }
+}
+
+}
 
 impl Partition {
-/*
-
-let iter s f t =
-  let fst = uget t.first s in
-  let lst = uget t.last s in
-  for i = fst to lst - 1 do
-    f (uget t.elements i);
-  done
-
-let fold s f t accu =
-  let fst = uget t.first s in
-  let lst = uget t.last s in
-  let rec fold accu i =
-    if lst <= i then accu
-    else fold (f (uget t.elements i) accu) (succ i)
-  in
-  fold accu fst
-
-let iter_all f t =
-  for i = 0 to t.partitions do f i; done
-
-let fold_all f t accu =
-  let rec fold accu i =
-    if t.partitions <= i then accu
-    else fold (f i accu) (succ i)
-  in
-  fold accu 0
-
-let next i t =
-  if uget t.last (uget t.index i) < uget t.location i then -1
-  else uget t.elements (succ (uget t.location i))
-*/
 
 /// Split a partition between marked and unmarked elements. If this creates a
 /// new partition, it is returned. Otherwise it returns `None`.
-pub fn split (p : &mut Partition, i : Set) -> Option<Set> {
+pub fn split (&mut self, i : Set) -> Option<Set> {
   let Set(i) = i;
   let new = {
-    let info = &mut p.partinfo[i];
+    let info = &mut self.partinfo[i];
     if info.marked == info.last { info.marked = info.first; return None; }
     if info.marked == info.first { return None; }
     let ninfo = Info {
@@ -138,35 +143,35 @@ pub fn split (p : &mut Partition, i : Set) -> Option<Set> {
     info.first = info.marked;
     ninfo
   };
-  let len = p.partinfo.len() + 1;
+  let len = self.partinfo.len() + 1;
   for i in new.first..new.last {
-    p.index[p.elements[i]] = Set(len);
+    self.index[self.elements[i]] = Set(len);
   }
-  p.partinfo.push(new);
+  self.partinfo.push(new);
   Some (Set(len))
 }
 
-pub fn mark(p : &mut Partition, i : usize) {
-  let Set(set) = p.index[i];
-  let loc = p.location[i];
-  let mark = p.partinfo[set].marked;
+pub fn mark(&mut self, i : usize) {
+  let Set(set) = self.index[i];
+  let loc = self.location[i];
+  let mark = self.partinfo[set].marked;
   if mark <= loc {
-    p.elements[loc] = p.elements[mark];
-    p.location[p.elements[loc]] = loc;
-    p.elements[mark] = i;
-    p.partinfo[set].marked = mark + 1;
+    self.elements[loc] = self.elements[mark];
+    self.location[self.elements[loc]] = loc;
+    self.elements[mark] = i;
+    self.partinfo[set].marked = mark + 1;
   }
 }
 
-pub fn is_marked (p : &Partition, i : Set) -> bool {
+pub fn is_marked (&self, i : Set) -> bool {
   let Set(i) = i;
-  let ref info = p.partinfo[i];
+  let ref info = self.partinfo[i];
   info.marked != info.first
 }
 
-pub fn choose(p : &Partition, i : Set) -> usize {
+pub fn choose(&self, i : Set) -> usize {
   let Set(i) = i;
-  p.elements[p.partinfo[i].first]
+  self.elements[self.partinfo[i].first]
 }
 
 /*
