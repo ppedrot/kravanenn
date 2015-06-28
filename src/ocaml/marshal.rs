@@ -118,11 +118,10 @@ macro_rules! ERROR_TRUNCATED {
 }
 
 fn parse_u8<T : Read>(file : &mut T) -> Result<u8> {
-  match file.bytes().next() {
-    None => ERROR_TRUNCATED!(),
-    Some (Ok (byte)) => Ok (byte),
-    Some (Err (e)) => Err (e),
-  }
+  let ref mut buf = [0; 1];
+  let n = try!(file.read(buf));
+  if n == 0 { ERROR_TRUNCATED!() };
+  Ok(buf[0])
 }
 
 fn parse_bytes<T : Read>(file : &mut T, buf : &mut [u8], len : usize) -> Result<()> {
@@ -149,31 +148,20 @@ fn parse_string<T : Read>(file : &mut T, len : usize) -> Result<RawString> {
 
 fn parse_u16<T : Read>(file : &mut T) -> Result<u16> {
   let mut buf = [0; 2];
-  buf[1] = try!(parse_u8(file));
-  buf[0] = try!(parse_u8(file));
-  Ok (unsafe { std::mem::transmute::<[u8; 2], u16>(buf) })
+  try!(parse_bytes(file, &mut buf, 2));
+  Ok (unsafe { std::mem::transmute::<[u8; 2], u16>(buf).swap_bytes() })
 }
 
 fn parse_u32<T : Read>(file : &mut T) -> Result<u32> {
   let mut buf = [0; 4];
-  buf[3] = try!(parse_u8(file));
-  buf[2] = try!(parse_u8(file));
-  buf[1] = try!(parse_u8(file));
-  buf[0] = try!(parse_u8(file));
-  Ok (unsafe { std::mem::transmute::<[u8; 4], u32>(buf) })
+  try!(parse_bytes(file, &mut buf, 4));
+  Ok (unsafe { std::mem::transmute::<[u8; 4], u32>(buf).swap_bytes() })
 }
 
 fn parse_u64<T : Read>(file : &mut T) -> Result<u64> {
   let mut buf = [0; 8];
-  buf[7] = try!(parse_u8(file));
-  buf[6] = try!(parse_u8(file));
-  buf[5] = try!(parse_u8(file));
-  buf[4] = try!(parse_u8(file));
-  buf[3] = try!(parse_u8(file));
-  buf[2] = try!(parse_u8(file));
-  buf[1] = try!(parse_u8(file));
-  buf[0] = try!(parse_u8(file));
-  Ok (unsafe { std::mem::transmute::<[u8; 8], u64>(buf) })
+  try!(parse_bytes(file, &mut buf, 8));
+  Ok (unsafe { std::mem::transmute::<[u8; 8], u64>(buf).swap_bytes() })
 }
 
 pub fn parse_header<T : Read>(file: &mut T) -> Result<Header> {
