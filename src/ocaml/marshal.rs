@@ -129,6 +129,7 @@ fn parse_bytes<T : Read>(file : &mut T, buf : &mut [u8], len : usize) -> Result<
   while i < len {
     let buf = &mut buf[i..len];
     let size = try!(file.read(buf));
+    if size == 0 { return Ok(()) /* FIXME */ };
     i = i + size;
   }
   Ok (())
@@ -373,6 +374,39 @@ pub fn read_segment<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   let buf = &mut [0; 16];
   let _ = try!(parse_bytes(f, buf, 16));
   Ok(mem)
+}
+
+fn read_segment_header<T : Read + Seek>(f : &mut T) -> Result<Option<Header>>{
+  // Offset
+  let mut i = 0;
+  let mut buf = [0; 4];
+  while i < 4 {
+    let off = try!(f.read(&mut buf));
+    if i == 0 && off == 0 { return Ok(None); }
+    if off == 0 { ERROR_TRUNCATED!(); }
+    i = i + off;
+  }
+  let pos = unsafe { std::mem::transmute::<[u8; 4], u32>(buf) + 16 };
+  println!("Pos {}", pos);
+  // Payload + Digest
+  let header = try!(parse_header(f));
+  let _ = try!(f.seek(std::io::SeekFrom::Start(pos as u64)));
+  Ok(Some(header))
+}
+
+pub fn read_file_summary<T : Read + Seek>(f : &mut T) -> Result<Box<[Header]>>{
+  // Magic number
+  let _ = try!(parse_u32(f));
+  // Segments
+  let mut segments = Vec::new();
+  loop {
+    let hd = try!(read_segment_header(f));
+    match hd {
+      None => { break; }
+      Some (hd) => { segments.push(hd); }
+    }
+  };
+  Ok(segments.into_boxed_slice())
 }
 
 pub fn read_file<T : Read>(f : &mut T) -> Result<Box<[(Header, ObjRepr)]>>{
