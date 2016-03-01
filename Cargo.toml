@@ -3,3 +3,12 @@
 name = "kravanenn"
 version = "0.0.1"
 authors = [ "Pierre-Marie Pédrot <pierre-marie.pedrot@inria.fr>" ]
+
+[lib]
+name = "kravanenn"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kravanenn"
+path = "src/main.rs"
+doc = false
