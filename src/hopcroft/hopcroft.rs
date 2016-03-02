@@ -2,6 +2,9 @@ use std::cmp::{Ord, Ordering};
 use std::vec::Vec;
 use hopcroft::partition::{Partition, Set};
 
+pub enum StateT {}
+enum TransitionT {}
+
 type state = usize;
 
 pub struct Transition<L> {
@@ -20,21 +23,21 @@ pub struct Automaton<L> {
 pub trait Hopcroft<T> {
 
 /// Associate the equivalence classes of the states of an automaton
-fn reduce (a : &mut Automaton<T>) -> Partition;
+fn reduce (a : &mut Automaton<T>) -> Partition<StateT>;
 
 }
 
 struct Environment {
   /// Current partition of the states
-  state_partition : Partition,
+  state_partition : Partition<StateT>,
   /// Current partition of the transitions
-  transition_partition : Partition,
+  transition_partition : Partition<TransitionT>,
   /// Associate to each transition its source
   transition_source : Box<[usize]>,
   /// Associate to each state the list of transitions that ends in it
   state_pred_trans : Box<[Vec<usize>]>,
   /// Partitions waiting to be processed
-  partition_todo : Vec<Set>,
+  partition_todo : Vec<Set<TransitionT>>,
 }
 
 /// Associate the list of transitions ending in a given state
@@ -96,7 +99,7 @@ fn init<T : Ord>(automaton : &mut Automaton<T>) -> Environment {
   }
 }
 
-fn split_partition(s : Set, env : &mut Environment) {
+fn split_partition(s : Set<StateT>, env : &mut Environment) {
   let r = match env.state_partition.split(s) {
     None => { return; }
     Some (r) => { r }
@@ -190,7 +193,7 @@ fn split_partition(s : Set, env : &mut Environment) {
 
 impl<T> Hopcroft<T> for T where T : Ord {
 
-fn reduce (automaton : &mut Automaton<T>) -> Partition {
+fn reduce (automaton : &mut Automaton<T>) -> Partition<StateT> {
   let env = init(automaton);
   panic!("foo");
 }
