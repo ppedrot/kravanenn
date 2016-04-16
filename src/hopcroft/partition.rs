@@ -184,12 +184,4 @@ pub fn choose(&self, i : Set<T>) -> usize {
   self.elements[self.partinfo[i].first]
 }
 
-/*
-
-let choose s t = uget t.elements (uget t.first s)
-
-let represent s = s
-
-*/
-
 }

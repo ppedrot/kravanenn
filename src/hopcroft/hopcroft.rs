@@ -100,7 +100,7 @@ fn init<T : Ord>(automaton : &mut Automaton<T>) -> Environment {
 }
 
 fn split_partition(s : Set<StateT>, env : &mut Environment, splitter_touched : &mut Vec<Set<TransitionT>>) {
-  assert_eq!(splitter_touched.len(), 0);
+  assert!(splitter_touched.is_empty());
   let r = match env.state_partition.split(s) {
     None => { return; }
     Some (r) => { r }
@@ -124,36 +124,9 @@ fn split_partition(s : Set<StateT>, env : &mut Environment, splitter_touched : &
   }
 }
 
-// let split_partition s inv env todo =
-//   let p = env.state_partition in
-//   let r = SPartition.split s p in
-//   if SPartition.is_valid r then begin
-//     let r = if SPartition.size r p < SPartition.size s p then r else s in
-//     let fold state accu =
-//       let fold accu trans =
-//         let pt = TPartition.partition trans env.transition_partition in
-//         let accu =
-//           if TPartition.is_marked pt env.transition_partition then accu
-//           else pt :: accu
-//         in
-//         let () = TPartition.mark trans env.transition_partition in
-//         accu
-//       in
-//       List.fold_left fold accu inv.(state)
-//     in
-//     let splitter_touched = SPartition.fold r fold p [] in
-//     let fold_touched todo pt =
-//       let npt = TPartition.split pt env.transition_partition in
-//       if TPartition.is_valid npt then npt :: todo
-//       else todo
-//     in
-//     List.fold_left fold_touched todo splitter_touched
-//   end else
-//     todo
-
 fn reduce_loop(env : &mut Environment, state_touched : &mut Vec<Set<StateT>>, splitter_touched : &mut Vec<Set<TransitionT>>) {
-  assert_eq!(state_touched.len(), 0);
-  assert_eq!(splitter_touched.len(), 0);
+  assert!(state_touched.is_empty());
+  assert!(splitter_touched.is_empty());
   match env.partition_todo.pop() {
     None => (),
     Some (pt) => {
@@ -172,30 +145,6 @@ fn reduce_loop(env : &mut Environment, state_touched : &mut Vec<Set<StateT>>, sp
     }
   }
 }
-
-// let reduce_aux automaton =
-//   let env, splitter_todo = init automaton in
-//   let inv = reverse automaton in
-//   let rec loop = function
-//   | [] -> ()
-//   | pt :: todo ->
-//     let fold t state_touched =
-//       let previous = env.transition_source.(t) in
-//       let equiv = SPartition.partition previous env.state_partition in
-//       let state_touched =
-//         if SPartition.is_marked equiv env.state_partition then state_touched
-//         else equiv :: state_touched
-//       in
-//       let () = SPartition.mark previous env.state_partition in
-//       state_touched
-//     in
-//     let state_touched = TPartition.fold pt fold env.transition_partition [] in
-//     let fold_touched todo equiv = split_partition equiv inv env todo in
-//     let splitter_todo = List.fold_left fold_touched todo state_touched in
-//     loop splitter_todo
-//   in
-//   let () = loop splitter_todo in
-//   (env, inv)
 
 impl<T> Hopcroft<T> for T where T : Ord {
 
