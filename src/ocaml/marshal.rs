@@ -1,9 +1,12 @@
+extern crate byteorder;
+
 use std;
 use std::io::prelude::*;
 use std::io::{Result, Error, ErrorKind};
 use std::ops::Deref;
 use std::fmt::{Display, LowerHex, Formatter};
 use std::{char};
+use self::byteorder::{ReadBytesExt, BigEndian};
 
 static MARSHAL_MAGIC : u32 = 0x8495a6be;
 
@@ -108,61 +111,43 @@ impl <T> Add<T> for Vec<T> {
   }
 }
 
-macro_rules! ERROR_TRUNCATED {
-    () => {
-      {
-        let err = Error::new(ErrorKind::InvalidInput, "Truncated object");
-        return Err(err)
-      }
-  };
-}
-
 fn parse_u8<T : Read>(file : &mut T) -> Result<u8> {
-  let ref mut buf = [0; 1];
-  let n = try!(file.read(buf));
-  if n == 0 { ERROR_TRUNCATED!() };
-  Ok(buf[0])
+  file.read_u8()
 }
 
-fn parse_bytes<T : Read>(file : &mut T, buf : &mut [u8], len : usize) -> Result<()> {
+fn parse_bytes<T : Read>(file : &mut T, buf : &mut [u8]) -> Result<bool> {
+  let len = buf.len();
   let mut i : usize = 0;
   while i < len {
     let buf = &mut buf[i..len];
     let size = try!(file.read(buf));
-    if size == 0 { return Ok(()) /* FIXME */ };
+    if size == 0 && i == 0 { return Ok(false) };
+    if size == 0 {
+      let err = Error::new(ErrorKind::InvalidInput, "Truncated object");
+      return Err(err);
+    };
     i = i + size;
   }
-  Ok (())
+  Ok (true)
 }
 
 fn parse_string<T : Read>(file : &mut T, len : usize) -> Result<RawString> {
   let mut buf : Vec<u8> = std::vec::Vec::with_capacity(len);
-  let mut i = 0;
-  // Initialize the answer
-  while i < len {
-    buf.push(0);
-    i = i + 1;
-  };
-  let () = try!(parse_bytes(file, &mut buf, len));
+  unsafe { buf.set_len(len) };
+  let () = try!(file.read_exact(&mut buf));
   Ok (RawString(buf.into_boxed_slice()))
 }
 
 fn parse_u16<T : Read>(file : &mut T) -> Result<u16> {
-  let mut buf = [0; 2];
-  try!(parse_bytes(file, &mut buf, 2));
-  Ok (unsafe { std::mem::transmute::<[u8; 2], u16>(buf).swap_bytes() })
+  file.read_u16::<BigEndian>()
 }
 
 fn parse_u32<T : Read>(file : &mut T) -> Result<u32> {
-  let mut buf = [0; 4];
-  try!(parse_bytes(file, &mut buf, 4));
-  Ok (unsafe { std::mem::transmute::<[u8; 4], u32>(buf).swap_bytes() })
+  file.read_u32::<BigEndian>()
 }
 
 fn parse_u64<T : Read>(file : &mut T) -> Result<u64> {
-  let mut buf = [0; 8];
-  try!(parse_bytes(file, &mut buf, 8));
-  Ok (unsafe { std::mem::transmute::<[u8; 8], u64>(buf).swap_bytes() })
+  file.read_u64::<BigEndian>()
 }
 
 pub fn parse_header<T : Read>(file: &mut T) -> Result<Header> {
@@ -186,7 +171,7 @@ macro_rules! INT {
     ($e:expr) => {
       {
         let i = try!($e);
-        Ok (Some (Object::Int (i as i64)))
+        Ok (Object::Int (i as i64))
       }
   };
 }
@@ -195,7 +180,7 @@ macro_rules! PTR {
     ($e:expr) => {
       {
         let i = try!($e);
-        Ok (Some (Object::Pointer (i as usize)))
+        Ok (Object::Pointer (i as usize))
       }
   };
 }
@@ -204,66 +189,61 @@ macro_rules! STR {
     ($file:expr, $len:expr) => {
       {
         let string = try!(parse_string($file, $len));
-        Ok (Some (Object::String (string)))
+        Ok (Object::String (string))
       }
   };
 }
 
-fn parse_object<T : Read>(file : &mut T) -> Result<Option<Object>> {
-  match file.bytes().next() {
-    None => Ok (None),
-    Some (Ok (data)) =>
-      if PREFIX_SMALL_BLOCK <= data {
-        let tag = data & 0x0F;
-        let len = ((data >> 4) & 0x07) as usize;
-        Ok (Some (Object::Block(tag, len)))
-      } else if PREFIX_SMALL_INT <= data {
-        let n = (data & 0x3F) as i64;
-        Ok (Some (Object::Int (n)))
-      } else if PREFIX_SMALL_STRING <= data {
-        let len = (data & 0x1F) as usize;
-        STR!(file, len)
-      } else {
-        match tag_of_int(data) {
-          Tag::TagInt8 => INT!(parse_u8(file)),
-          Tag::TagInt16 => INT!(parse_u16(file)),
-          Tag::TagInt32 => INT!(parse_u32(file)),
-          Tag::TagInt64 => INT!(parse_u64(file)),
-          Tag::TagShared8 => PTR!(parse_u8(file)),
-          Tag::TagShared16 => PTR!(parse_u16(file)),
-          Tag::TagShared32 => PTR!(parse_u32(file)),
+fn parse_object<T : Read>(file : &mut T) -> Result<Object> {
+  let data = try!(file.read_u8());
+  if PREFIX_SMALL_BLOCK <= data {
+    let tag = data & 0x0F;
+    let len = ((data >> 4) & 0x07) as usize;
+    Ok (Object::Block(tag, len))
+  } else if PREFIX_SMALL_INT <= data {
+    let n = (data & 0x3F) as i64;
+    Ok (Object::Int (n))
+  } else if PREFIX_SMALL_STRING <= data {
+    let len = (data & 0x1F) as usize;
+    STR!(file, len)
+  } else {
+    match tag_of_int(data) {
+      Tag::TagInt8 => INT!(parse_u8(file)),
+      Tag::TagInt16 => INT!(parse_u16(file)),
+      Tag::TagInt32 => INT!(parse_u32(file)),
+      Tag::TagInt64 => INT!(parse_u64(file)),
+      Tag::TagShared8 => PTR!(parse_u8(file)),
+      Tag::TagShared16 => PTR!(parse_u16(file)),
+      Tag::TagShared32 => PTR!(parse_u32(file)),
 //           Tag::TagDoubleArray32Little =>,
-          Tag::TagBlock32 => {
-            let obj = try!(parse_u32(file));
-            Ok (Some (Object::Block((obj & 0xFF) as u8, (obj >> 10) as usize)))
-          },
-          Tag::TagString8 => {
-            let len = try!(parse_u8(file)) as usize;
-            STR!(file, len)
-          },
-          Tag::TagString32 => {
-            let len = try!(parse_u32(file)) as usize;
-            STR!(file, len)
-          },
+      Tag::TagBlock32 => {
+        let obj = try!(parse_u32(file));
+        Ok (Object::Block((obj & 0xFF) as u8, (obj >> 10) as usize))
+      },
+      Tag::TagString8 => {
+        let len = try!(parse_u8(file)) as usize;
+        STR!(file, len)
+      },
+      Tag::TagString32 => {
+        let len = try!(parse_u32(file)) as usize;
+        STR!(file, len)
+      },
 //           Tag::TagDoubleBig =>,
 //           Tag::TagDoubleLittle =>,
 //           Tag::TagDoubleArray8Big =>,
 //           Tag::TagDoubleArray8Little =>,
 //           Tag::TagDoubleArray32Big =>,
-          Tag::TagCodePointer => {
-            let addr = try!(parse_u32(file));
-            let buf = &mut [0; 16];
-            let () = try!(parse_bytes(file, buf, 16));
-            Ok (Some (Object::Code(addr)))
-          },
+      Tag::TagCodePointer => {
+        let addr = try!(parse_u32(file));
+        let buf = &mut [0; 16];
+        let () = try!(file.read_exact(buf));
+        Ok (Object::Code(addr))
+      },
 //           Tag::TagInfixPointer =>,
 //           Tag::TagCustom =>,
 //           Tag::TagBlock64 =>,
-        _ => panic!("Code {} not handled", data),
-      }
-    },
-    Some (Err (e)) => Err (e),
-  }
+    _ => panic!("Code {} not handled", data),
+  } }
 }
 
 struct BackPointer {
@@ -318,10 +298,6 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
 //     println!("{:?}", stack);
     // Retrieve the header of the object
     let obj = try!(parse_object(f));
-    let obj = match obj {
-      None => { ERROR_TRUNCATED!() },
-      Some (obj) => obj,
-    };
     //
     let field = match obj {
       Object::Block(tag, 0) => Field::Atm(tag),
@@ -372,21 +348,18 @@ pub fn read_segment<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   let mem = try!(read_object(f));
   // Digest
   let buf = &mut [0; 16];
-  let _ = try!(parse_bytes(f, buf, 16));
+  let _ = try!(f.read_exact(buf));
   Ok(mem)
 }
 
 fn read_segment_header<T : Read + Seek>(f : &mut T) -> Result<Option<Header>>{
   // Offset
-  let mut i = 0;
   let mut buf = [0; 4];
-  while i < 4 {
-    let off = try!(f.read(&mut buf));
-    if i == 0 && off == 0 { return Ok(None); }
-    if off == 0 { ERROR_TRUNCATED!(); }
-    i = i + off;
-  }
-  let pos = unsafe { std::mem::transmute::<[u8; 4], u32>(buf) + 16 };
+  let read = try!(parse_bytes(f, &mut buf));
+  if !read { return Ok(None); };
+  let pos = try!(buf.as_ref().read_u32::<BigEndian>());
+  // Ignore the digest
+  let pos = pos + 16;
   println!("Pos {}", pos);
   // Payload + Digest
   let header = try!(parse_header(f));
@@ -396,6 +369,7 @@ fn read_segment_header<T : Read + Seek>(f : &mut T) -> Result<Option<Header>>{
 
 pub fn read_file_summary<T : Read + Seek>(f : &mut T) -> Result<Box<[Header]>>{
   // Magic number
+  println!("Reading magic number");
   let _ = try!(parse_u32(f));
   // Segments
   let mut segments = Vec::new();

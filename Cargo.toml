@@ -17,3 +17,6 @@ doc = false
 name = "compactor"
 path = "src/bin/compactor.rs"
 doc = false
+
+[dependencies]
+byteorder = "0.5"
