@@ -5,12 +5,12 @@ use hopcroft::partition::{Partition, Set};
 pub enum StateT {}
 enum TransitionT {}
 
-type state = usize;
+type State = usize;
 
 pub struct Transition<L> {
   lbl : L,
-  src : state,
-  dst : state,
+  src : State,
+  dst : State,
 }
 
 pub struct Automaton<L> {
@@ -86,7 +86,7 @@ fn init<T : Ord>(automaton : &mut Automaton<T>) -> Environment {
     let _ = sp_part.split(pt);
   }
   // Push every splitter in the todo stack
-  let mut todo = Vec::new();
+  let mut todo = Vec::with_capacity(sp_part.len());
   for partition in sp_part.into_iter() {
     todo.push(partition);
   }
@@ -99,25 +99,29 @@ fn init<T : Ord>(automaton : &mut Automaton<T>) -> Environment {
   }
 }
 
-fn split_partition(s : Set<StateT>, env : &mut Environment) {
+fn split_partition(s : Set<StateT>, env : &mut Environment, splitter_touched : &mut Vec<Set<TransitionT>>) {
+  assert_eq!(splitter_touched.len(), 0);
   let r = match env.state_partition.split(s) {
     None => { return; }
     Some (r) => { r }
   };
-  let ref state_part = env.state_partition;
-  let ref state_pred_trans = env.state_pred_trans;
-  let ref mut trans_part = env.transition_partition;
-  let r = if state_part.size(r) < state_part.size(s) { r } else { s };
-//   let _ = state_part.class(r).flat_map(|state| {
-//     let ref preds : Vec<usize> = state_pred_trans[state];
-//     preds.into_iter().filter(|trans : &&usize| {
-//       let pt = trans_part.partition(**trans); 
-//       let ans = trans_part.is_marked(pt);
-//       trans_part.mark(**trans);
-//       ans
-//     })
-//   });
-  ()
+  let r = if env.state_partition.size(r) < env.state_partition.size(s) { r } else { s };
+  for state in env.state_partition.class(r).into_iter() {
+    let ref preds = env.state_pred_trans[state];
+    for trans in preds {
+      let pt = env.transition_partition.partition(*trans);
+      if !env.transition_partition.is_marked(pt) {
+        splitter_touched.push(pt);
+      };
+      env.transition_partition.mark(*trans);
+    }
+  }
+  for pt in splitter_touched.drain(..) {
+    match env.transition_partition.split(pt) {
+      None => (),
+      Some (npt) => { env.partition_todo.push(npt) },
+    }
+  }
 }
 
 // let split_partition s inv env todo =
@@ -146,7 +150,29 @@ fn split_partition(s : Set<StateT>, env : &mut Environment) {
 //     List.fold_left fold_touched todo splitter_touched
 //   end else
 //     todo
-// 
+
+fn reduce_loop(env : &mut Environment, state_touched : &mut Vec<Set<StateT>>, splitter_touched : &mut Vec<Set<TransitionT>>) {
+  assert_eq!(state_touched.len(), 0);
+  assert_eq!(splitter_touched.len(), 0);
+  match env.partition_todo.pop() {
+    None => (),
+    Some (pt) => {
+      for trans in env.transition_partition.class(pt).into_iter() {
+        let previous = env.transition_source[trans];
+        let equiv = env.state_partition.partition(previous);
+        if !env.state_partition.is_marked(equiv) {
+          state_touched.push(equiv);
+        }
+        env.state_partition.mark(previous);
+      }
+      for state in state_touched.drain(..) {
+        split_partition(state, env, splitter_touched);
+      }
+      reduce_loop(env, state_touched, splitter_touched);
+    }
+  }
+}
+
 // let reduce_aux automaton =
 //   let env, splitter_todo = init automaton in
 //   let inv = reverse automaton in
@@ -170,32 +196,15 @@ fn split_partition(s : Set<StateT>, env : &mut Environment) {
 //   in
 //   let () = loop splitter_todo in
 //   (env, inv)
-// 
-// let reduce automaton =
-//   let (ans, _) = reduce_aux automaton in
-//   let mapping = Array.create (SPartition.length ans.state_partition) [] in
-//   let iter set =
-//     let pi = SPartition.represent set in
-//     let iter i =
-//       let map = Array.unsafe_get mapping pi in
-//       Array.unsafe_set mapping pi (i :: map)
-//     in
-//     SPartition.iter set iter ans.state_partition
-//   in
-//   let () = SPartition.iter_all iter ans.state_partition in
-//   mapping
-// 
-//   let reduce_partition automaton =
-//     let (ans, _) = reduce_aux automaton in
-//     ans.state_partition
-// 
-// end
 
 impl<T> Hopcroft<T> for T where T : Ord {
 
 fn reduce (automaton : &mut Automaton<T>) -> Partition<StateT> {
-  let env = init(automaton);
-  panic!("foo");
+  let mut env = init(automaton);
+  let mut state_touched = Vec::new();
+  let mut splitter_touched = Vec::new();
+  reduce_loop(&mut env, &mut state_touched, &mut splitter_touched);
+  env.state_partition
 }
 
 }
