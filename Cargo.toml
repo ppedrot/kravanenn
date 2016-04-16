@@ -10,5 +10,10 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "kravanenn"
-path = "src/main.rs"
+path = "src/bin/kravanenn.rs"
+doc = false
+
+[[bin]]
+name = "compactor"
+path = "src/bin/compactor.rs"
 doc = false
