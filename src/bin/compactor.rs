@@ -3,6 +3,7 @@ extern crate kravanenn;
 use std::fs::File;
 use std::io::{Seek, SeekFrom};
 use kravanenn::ocaml::marshal;
+use kravanenn::ocaml::compact;
 
 macro_rules! try_fatal {
     ($e:expr) => {
@@ -32,6 +33,7 @@ fn main () {
   let _ = try_fatal!(file.seek(SeekFrom::Start(4)));
   for i in 0..segments.len() {
     println!("Reading segment {}", i);
-    let seg = try_fatal!(marshal::read_segment(&mut file));
+    let (_, seg) = try_fatal!(marshal::read_segment(&mut file));
+    let seg = compact::reduce(&seg);
   }
 }

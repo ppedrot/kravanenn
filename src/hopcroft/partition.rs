@@ -29,7 +29,7 @@ pub struct Partition<T> {
 
 impl<T> Set<T> {
 
-pub fn to_usize (i : Set<T>) -> usize { let Set(i, _) = i; i }
+pub fn to_usize (self) -> usize { let Set(i, _) = self; i }
 
 pub fn of_usize (i : usize) -> Set<T> {
   Set(i, PhantomData)
@@ -153,7 +153,7 @@ pub fn split (&mut self, i : Set<T>) -> Option<Set<T>> {
     info.first = info.marked;
     ninfo
   };
-  let len = self.partinfo.len() + 1;
+  let len = self.partinfo.len();
   for i in new.first..new.last {
     self.index[self.elements[i]] = Set::of_usize(len);
   }
@@ -169,6 +169,7 @@ pub fn mark(&mut self, i : usize) {
     self.elements[loc] = self.elements[mark];
     self.location[self.elements[loc]] = loc;
     self.elements[mark] = i;
+    self.location[i] = mark;
     self.partinfo[set].marked = mark + 1;
   }
 }

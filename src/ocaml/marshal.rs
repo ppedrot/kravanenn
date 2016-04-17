@@ -42,10 +42,10 @@ static MAX_TAG : u8 = 0x13;
 pub struct RawString (Box<[u8]>);
 
 impl Deref for RawString {
-  type Target = [u8];
-  fn deref(&self) -> &[u8] {
+  type Target = Box<[u8]>;
+  fn deref(&self) -> &Box<[u8]> {
     let RawString(ref s) = *self;
-    s.as_ref()
+    s
   }
 }
 
@@ -92,6 +92,14 @@ pub struct Header {
 }
 
 pub struct Memory (pub Box<[Obj]>);
+
+impl Deref for Memory {
+  type Target = Box<[Obj]>;
+  fn deref(&self) -> &Box<[Obj]> {
+    let Memory(ref s) = *self;
+    s
+  }
+}
 
 fn tag_of_int (i : u8) -> Tag {
   if MAX_TAG < i { panic!("Unknown tag {}", i); };
