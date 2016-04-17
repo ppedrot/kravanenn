@@ -9,22 +9,27 @@ type State = usize;
 
 pub struct Transition<L> {
   lbl : L,
+  // Label of the transition
   src : State,
+  // Source state
   dst : State,
+  // Target state
+}
+
+impl<L> Transition<L> {
+
+/// Create a new transition with the provided label, source and target
+pub fn new(lbl : L, src : usize, dst : usize) -> Transition<L> {
+  Transition { lbl : lbl, src : src, dst : dst }
+}
+
 }
 
 pub struct Automaton<L> {
   /// Number of states
-  states : usize,
+  pub states : usize,
   /// List of unique transitions between states
-  transitions : Box<[Transition<L>]>,
-}
-
-pub trait Hopcroft<T> {
-
-/// Associate the equivalence classes of the states of an automaton
-fn reduce (a : &mut Automaton<T>) -> Partition<StateT>;
-
+  pub transitions : Box<[Transition<L>]>,
 }
 
 struct Environment {
@@ -146,10 +151,11 @@ fn reduce_loop(env : &mut Environment, state_touched : &mut Vec<Set<StateT>>, sp
   }
 }
 
-impl<T> Hopcroft<T> for T where T : Ord {
+impl<T : Ord> Automaton<T> {
 
-fn reduce (automaton : &mut Automaton<T>) -> Partition<StateT> {
-  let mut env = init(automaton);
+/// Associate the equivalence classes of the states of an automaton
+pub fn reduce(&mut self) -> Partition<StateT> {
+  let mut env = init(self);
   let mut state_touched = Vec::new();
   let mut splitter_touched = Vec::new();
   reduce_loop(&mut env, &mut state_touched, &mut splitter_touched);
