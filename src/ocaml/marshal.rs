@@ -360,7 +360,6 @@ fn read_segment_header<T : Read + Seek>(f : &mut T) -> Result<Option<Header>>{
   let pos = try!(buf.as_ref().read_u32::<BigEndian>());
   // Ignore the digest
   let pos = pos + 16;
-  println!("Pos {}", pos);
   // Payload + Digest
   let header = try!(parse_header(f));
   let _ = try!(f.seek(std::io::SeekFrom::Start(pos as u64)));
@@ -369,7 +368,6 @@ fn read_segment_header<T : Read + Seek>(f : &mut T) -> Result<Option<Header>>{
 
 pub fn read_file_summary<T : Read + Seek>(f : &mut T) -> Result<Box<[Header]>>{
   // Magic number
-  println!("Reading magic number");
   let _ = try!(parse_u32(f));
   // Segments
   let mut segments = Vec::new();
@@ -381,17 +379,4 @@ pub fn read_file_summary<T : Read + Seek>(f : &mut T) -> Result<Box<[Header]>>{
     }
   };
   Ok(segments.into_boxed_slice())
-}
-
-pub fn read_file<T : Read>(f : &mut T) -> Result<Box<[(Header, ObjRepr)]>>{
-  let mut ans = Vec::new();
-  // Magic number
-  let _ = try!(parse_u32(f));
-  let mut i = 5;
-  while 0 < i {
-    let segment = try!(read_segment(f));
-    ans.push(segment);
-    i = i - 1;
-  }
-  Ok(ans.into_boxed_slice())
 }
