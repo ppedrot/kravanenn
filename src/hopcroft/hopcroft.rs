@@ -129,11 +129,11 @@ fn split_partition(s : Set<StateT>, env : &mut Environment, splitter_touched : &
   }
 }
 
-fn reduce_loop(env : &mut Environment, state_touched : &mut Vec<Set<StateT>>, splitter_touched : &mut Vec<Set<TransitionT>>) {
+fn reduce_loop(env : &mut Environment, state_touched : &mut Vec<Set<StateT>>, splitter_touched : &mut Vec<Set<TransitionT>>) -> bool {
   assert!(state_touched.is_empty());
   assert!(splitter_touched.is_empty());
   match env.partition_todo.pop() {
-    None => (),
+    None => false,
     Some (pt) => {
       for trans in env.transition_partition.class(pt).into_iter() {
         let previous = env.transition_source[trans];
@@ -146,7 +146,7 @@ fn reduce_loop(env : &mut Environment, state_touched : &mut Vec<Set<StateT>>, sp
       for state in state_touched.drain(..) {
         split_partition(state, env, splitter_touched);
       }
-      reduce_loop(env, state_touched, splitter_touched);
+      true
     }
   }
 }
@@ -158,7 +158,7 @@ pub fn reduce(&mut self) -> Partition<StateT> {
   let mut env = init(self);
   let mut state_touched = Vec::new();
   let mut splitter_touched = Vec::new();
-  reduce_loop(&mut env, &mut state_touched, &mut splitter_touched);
+  while reduce_loop(&mut env, &mut state_touched, &mut splitter_touched) {};
   env.state_partition
 }
 
