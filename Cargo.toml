@@ -20,3 +20,4 @@ doc = false
 
 [dependencies]
 byteorder = "0.5"
+fixedbitset = "0.1.8"

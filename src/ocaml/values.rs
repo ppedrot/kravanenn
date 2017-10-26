@@ -1,55 +1,502 @@
-use std::rc::Rc;
+type CowS<'a, T> = &'a T;
+type CowVec<'a, T> = CowS<'a, [T]>;
+type CowVec2<'a, T> = CowVec<'a, CowVec<'a, T>>;
 
+pub type ValueR<'a> = &'a Value<'a>;
+
+type CowVecV<'a> = CowVec<'a, ValueR<'a>>;
+type CowVecV2<'a> = CowVec2<'a, ValueR<'a>>;
+
+#[derive(PartialEq, Eq, Ord, PartialOrd, Copy, Clone, Debug)]
 pub enum Value<'a> {
   Any,
-//   Fail(&'static str),
-  Tuple(&'static str, &'a [&'a Value<'a>]),
-  Sum(&'static str, usize, &'a [&'a [Value<'a>]]),
-//   Array(Rc<Value>),
-//   List(Rc<Value>),
-//   Opt(Rc<Value>),
+  Fail(&'a str),
+  Tuple(&'a str, CowVecV<'a>),
+  Sum(&'a str, usize, CowVecV2<'a>),
+  Array(ValueR<'a>),
+  List(ValueR<'a>),
+  Opt(ValueR<'a>),
   Int,
   String,
-//   Annot(String, Rc<Value>),
-//   Dyn,
-//   Fix(Box<Fn (Value) -> Value>),
+  // Annot(String, Rc<Value<'a>>),
+  Dyn,
 }
 
-static UNIT : Value<'static> = Value::Tuple ("unit", &[]);
-static BOOL : Value<'static> = Value::Sum ("bool", 2, &[]);
+type ValueS = Value<'static>;
 
-impl <'a> Value<'a> {
-
-// fn tuple(name : &'static str, v : &'a[&'a Value<'a>]) -> Value<'a> {
-//   Value::Tuple(name, v)
-// }
-
-// fn sum(name : &'static str, constr : usize, v : Vec<Vec<Rc<Value>>>) -> Value {
-//   Value::Sum(name, constr, v)
-// }
-
-// fn enum_(name : &'static str, constr : usize) -> Value {
-//   Value::Sum(name, constr, Vec::new())
-// }
-
-// fn pair(v1 : Value, v2 : Value) -> Value {
-//   Value::tuple("*", vec!(Rc::new(v1), Rc::new(v2)))
-// }
-
-// fn ref_ (v : Rc<Value>) -> Value {
-//   Value::tuple("ref", vec!(v))
-// }
-
-// fn set (e : Rc<Value>) -> Value {
-//   let f = |v : Value| {
-//     let v1 = Rc::new(v);
-//     let v2 = v1.clone();
-//     Value::Sum ("set", 1, vec!(vec!(v1, v2)))
-//   };
-//   Value::Fix(Box::new(f))
-// }
-
+macro_rules! B {
+    ($e:expr) => {
+        &$e
+    }
 }
+
+macro_rules! CB {
+    ($( $e:expr ),*) => {
+        &[$( $e ),*]
+    }
+}
+
+macro_rules! FAIL {
+    ($e:expr) => {
+        Value::Fail(B!($e))
+    }
+}
+
+macro_rules! TUPLE {
+    ($s:expr, $( $e:expr ),* ) => {
+        Value::Tuple($s, CB!($( B!($e) ),*))
+    }
+}
+
+macro_rules! SUM {
+    ($s:expr, $i:expr, $( [ $( $e:expr ),* ] ),* ) => {
+        Value::Sum($s, $i, CB!($( CB!($( B!($e) ),*) ),*))
+    }
+}
+
+macro_rules! LIST {
+    ($e:expr) => {
+        Value::List(B!($e))
+    }
+}
+
+macro_rules! OPT {
+    ($e:expr) => {
+        Value::Opt(B!($e))
+    }
+}
+
+macro_rules! ARRAY {
+    ($e:expr) => {
+        Value::Array(B!($e))
+    }
+}
+
+macro_rules! ENUM {
+    ($s:expr, $i:expr) => {
+        SUM!($s, $i, [])
+    }
+}
+
+/* Ocaml standard library */
+macro_rules! PAIR {
+    ($v1:expr, $v2:expr) => {
+        TUPLE!("*", $v1, $v2)
+    }
+}
+
+static BOOL : ValueS = ENUM!("bool", 2);
+
+static INT : ValueS = Value::Int;
+
+macro_rules! REF {
+    ($v:expr) => {
+        TUPLE!("ref", $v)
+    }
+}
+
+static STRING : ValueS = Value::String;
+static ANY : ValueS = Value::Any;
+static DYN : ValueS = Value::Dyn;
+
+macro_rules! SET {
+    ($s:ident, $e:expr) => {
+        SUM!("set", 1, [$s, $e, $s, INT])
+   }
+}
+
+macro_rules! MAP {
+    ($m:ident, $vk:expr, $vd:expr) => {
+        SUM!("map", 1, [$m, $vk, $vd, $m, INT])
+   }
+}
+
+macro_rules! HSET {
+    ($s:ident, $v:expr) => {
+        MAP!($s, INT, $v)
+    }
+}
+
+macro_rules! HMAP {
+    ($m:ident, $vk:expr, $vd:expr) => {
+        {
+            static M : ValueS = MAP!(M, $vk, $vd);
+            MAP!($m, INT, M)
+        }
+   }
+}
+
+/* lib/future */
+macro_rules! COMPUTATION {
+    ($f:expr) => {
+        REF!(SUM!("Future.comput", 0, [FAIL!("Future.ongoing")], [$f]))
+    }
+}
+
+/* kernel/names */
+
+static ID : ValueS = Value::String;
+
+static DP : ValueS = LIST!(ID);
+
+static NAME : ValueS = SUM!("name", 1, [ID]);
+
+static UID : ValueS = TUPLE!("uniq_ident", INT, STRING, DP);
+
+static MP : ValueS = SUM!("module_path", 0, [DP], [UID], [MP, ID]);
+
+static KN : ValueS = TUPLE!("kernel_name", ANY, MP, DP, ID, INT);
+
+static CST : ValueS = SUM!("cst|mind", 0, [KN], [KN, KN]);
+
+static IND : ValueS = TUPLE!("inductive", CST, INT);
+
+static CONS : ValueS = TUPLE!("constructor", IND, INT);
+
+/* kernel/univ */
+
+static RAW_LEVEL : ValueS = SUM!("raw_level", 2 /* Prop, Set */, /*Level*/[INT, DP], /*Var*/[INT]);
+
+static LEVEL : ValueS = TUPLE!("level", INT, RAW_LEVEL);
+
+static EXPR : ValueS = TUPLE!("levelexpr", LEVEL, INT);
+
+static UNIV : ValueS = SUM!("universe", 1, [EXPR, INT, UNIV]);
+
+static CSTRS : ValueS = SET!(CSTRS, TUPLE!("univ_constraint", LEVEL, ENUM!("order_request", 3), LEVEL));
+
+static INSTANCE : ValueS = ARRAY!(LEVEL);
+
+static CONTEXT : ValueS = TUPLE!("universe_context", INSTANCE, CSTRS);
+
+// static ABS_CONTEXT : ValueS = CONTEXT; // Only for clarity
+static ABS_CONTEXT : ValueS = TUPLE!("universe_context", INSTANCE, CSTRS); // Only for clarity
+
+// static ABS_CUM_INFO : ValueS = TUPLE!("cumulativity_info", ABS_CONTEXT, CONTEXT);
+
+static CONTEXT_SET : ValueS = {
+    static LEVEL_SET : ValueS = HSET!(LEVEL_SET, LEVEL);
+    TUPLE!("universe_context_set", LEVEL_SET, CSTRS)
+ };
+
+/* kernel/term */
+static SORT : ValueS = SUM!("sort", 0, [ENUM!("cnt", 2)], [UNIV]);
+
+static SORTFAM : ValueS = ENUM!("sorts_family", 3);
+
+macro_rules! PUNIVERSES {
+    ($v:expr) => {
+        TUPLE!("punivs", $v, INSTANCE)
+    }
+}
+
+static BOOLLIST : ValueS = LIST!(BOOL);
+
+static CASEINFO : ValueS = {
+    static CSTYLE : ValueS = ENUM!("case_style", 5);
+    static CPRINT : ValueS = TUPLE!("case_printing", BOOLLIST, ARRAY!(BOOLLIST), CSTYLE);
+    TUPLE!("case_info", IND, INT, ARRAY!(INT), ARRAY!(INT), CPRINT)
+};
+
+static CAST : ValueS = ENUM!("cast_kind", 4);
+
+static PROJ : ValueS = TUPLE!("projection", CST, BOOL);
+
+pub static CONSTR : ValueS = SUM!("constr", 0,
+    [INT], // Rel
+    [FAIL!("Var")], // Var
+    [FAIL!("Meta")], // Meta
+    [FAIL!("Evar")], // Evar
+    [SORT], // Sort
+    [CONSTR, CAST, CONSTR], // Cast
+    [NAME, CONSTR, CONSTR], // Prod
+    [NAME, CONSTR, CONSTR], // Lambda
+    [NAME, CONSTR, CONSTR, CONSTR], // LetIn
+    [CONSTR, ARRAY!(CONSTR)], // App
+    [PUNIVERSES!(CST)], // Const
+    [PUNIVERSES!(IND)], // Ind
+    [PUNIVERSES!(CONS)], // Construct
+    [CASEINFO, CONSTR, CONSTR, ARRAY!(CONSTR)], // Case
+    [FIX], // Fix
+    [COFIX], // CoFix
+    [PROJ, CONSTR] // Proj
+);
+
+static PREC : ValueS = TUPLE!("prec_declaration", ARRAY!(NAME), ARRAY!(CONSTR), ARRAY!(CONSTR));
+
+static FIX : ValueS = TUPLE!("pfixpoint", TUPLE!("fix2", ARRAY!(INT), INT), PREC);
+
+static COFIX : ValueS = TUPLE!("pcofixpoint", INT, PREC);
+
+static RDECL : ValueS = SUM!("rel_declaration", 0,
+    [NAME, CONSTR], // LocalAssum
+    [NAME, CONSTR, CONSTR] // LocalDef
+);
+
+static RCTXT : ValueS = LIST!(RDECL);
+
+static SECTION_CTXT : ValueS = ENUM!("emptylist", 1);
+
+
+/* kernel/mod_subst */
+
+static DELTA_HINT : ValueS = SUM!("delta_hint", 0, [INT, OPT!(CONSTR)], [KN]);
+
+static RESOLVER : ValueS = {
+    static MP_MAP : ValueS = MAP!(MP_MAP, MP, MP);
+    static KN_MAP : ValueS = HMAP!(KN_MAP, KN, DELTA_HINT);
+    TUPLE!("delta_resolver", MP_MAP, KN_MAP)
+};
+
+static MP_RESOLVER : ValueS = TUPLE!("", MP, RESOLVER);
+
+static SUBST : ValueS = {
+    static MP_MAP : ValueS = MAP!(MP_MAP, MP, MP_RESOLVER);
+    static UID_MAP : ValueS = MAP!(UID_MAP, UID, MP_RESOLVER);
+    TUPLE!("substitution", MP_MAP, UID_MAP)
+};
+
+/* kernel/lazyconstr */
+
+
+macro_rules! SUBSTITUTED {
+    ($a:expr) => {
+        TUPLE!("substituted", $a, LIST!(SUBST))
+    }
+}
+
+static CSTR_SUBST : ValueS = SUBSTITUTED!(CONSTR);
+
+// NB: Second constructor [Direct] isn't supposed to appear in a .vo
+static LAZY_CONSTR : ValueS = SUM!("lazy_constr", 0, [LIST!(SUBST), DP, INT]);
+
+/* kernel/declarations */
+
+// static IMPREDICATIVE_SET : ValueS = ENUM!("impr-set", 2);
+static ENGAGEMENT : ValueS = ENUM!("impr-set", 2); // IMPREDICATIVE_SET;
+
+static POL_ARITY : ValueS = TUPLE!("polymorphic_arity", LIST!(OPT!(LEVEL)), UNIV);
+
+static CST_TYPE : ValueS = SUM!("constant_type", 0, [CONSTR], [PAIR!(RCTXT, POL_ARITY)]);
+
+static CST_DEF : ValueS = SUM!("constant_def", 0, [OPT!(INT)], [CSTR_SUBST], [LAZY_CONSTR]);
+
+static PROJBODY : ValueS = TUPLE!("projection_body", CST, INT, INT, CONSTR, TUPLE!("proj_eta", CONSTR, CONSTR), CONSTR);
+
+static TYPING_FLAGS : ValueS = TUPLE!("typing_flags", BOOL, BOOL);
+
+// static CONST_UNIVS : ValueS = SUM!("constant_universes", 0, [CONTEXT], [ABS_CONTEXT]);
+
+static CB : ValueS = TUPLE!("constant_body", SECTION_CTXT, CST_DEF, CST_TYPE, ANY, BOOL, CONTEXT, /*CONST_UNIVS,*/ OPT!(PROJBODY), BOOL, TYPING_FLAGS);
+
+static RECARG : ValueS = SUM!("recarg",
+    1, // Norec
+    [IND], // Mrec
+    [IND] // Imbr
+);
+
+static WFP : ValueS = SUM!("wf_paths", 0,
+    [INT, INT], // Rtree.Param
+    [RECARG, ARRAY!(WFP)], // Rtree.Node
+    [INT, ARRAY!(WFP)] // Rtree.Rec
+);
+
+static MONO_IND_ARITY : ValueS = TUPLE!("monomorphic_inductive_arity", CONSTR, SORT);
+
+static IND_ARITY : ValueS = SUM!("inductive_arity", 0, [MONO_IND_ARITY], [POL_ARITY]);
+
+static ONE_IND : ValueS = TUPLE!("one_inductive_body",
+    ID,
+    RCTXT,
+    IND_ARITY,
+    ARRAY!(ID),
+    ARRAY!(CONSTR),
+    INT,
+    INT,
+    LIST!(SORTFAM),
+    ARRAY!(CONSTR),
+    ARRAY!(INT),
+    ARRAY!(INT),
+    WFP,
+    INT,
+    INT,
+    ANY
+);
+
+static FINITE : ValueS = ENUM!("recursivity_kind", 3);
+
+static MIND_RECORD : ValueS = OPT!(OPT!(TUPLE!("record", ID, ARRAY!(CST), ARRAY!(PROJBODY))));
+
+/* static IND_PACK_UNIVS : ValueS = SUM!("abstract_inductive_universes", 0,
+    [CONTEXT],
+    [ABS_CONTEXT],
+    [ABS_CUM_INFO]
+); */
+
+static IND_PACK : ValueS = TUPLE!("mutual_inductive_body",
+    ARRAY!(ONE_IND),
+    MIND_RECORD,
+    FINITE,
+    INT,
+    SECTION_CTXT,
+    INT,
+    INT,
+    RCTXT,
+    BOOL, BOOL, TUPLE!("universes", CONTEXT, CONTEXT), // IND_PACK_UNIVS, // universes
+    OPT!(BOOL),
+    TYPING_FLAGS
+);
+
+static WITH : ValueS = SUM!("with_declaration_body", 0,
+    [LIST!(ID), MP],
+    [LIST!(ID), TUPLE!("with_def", CONSTR, CONTEXT)]
+);
+
+static MAE : ValueS = SUM!("module_alg_expr", 0,
+    [MP], // SEBident
+    [MAE, MP], // SEBapply
+    [MAE, WITH] // SEBwith
+);
+
+static SFB : ValueS = SUM!("struct_field_body", 0,
+    [CB], // SFBconst
+    [IND_PACK], // SFBmind
+    [MODULE], // SFBmodule
+    [MODTYPE] // SFBmodtype
+);
+
+static STRUC : ValueS = LIST!(TUPLE!("label*sfb", ID, SFB));
+
+static SIGN : ValueS = SUM!("module_sign", 0,
+    [STRUC], // NoFunctor
+    [UID, MODTYPE, SIGN] // MoreFunctor
+);
+
+static MEXPR : ValueS = SUM!("module_expr", 0,
+    [MAE], // NoFunctor
+    [UID, MODTYPE, MEXPR] // MoreFunctor
+);
+
+static IMPL : ValueS = SUM!("module_impl", 2, // Abstract, FullStruct
+    [MEXPR], // Algebraic
+    [SIGN] // Struct
+);
+
+static NOIMPL : ValueS = ENUM!("no_impl", 1); // Astract is mandatory for mtb
+
+static MODULE : ValueS = TUPLE!("module_body", MP, IMPL, SIGN, OPT!(MEXPR), CONTEXT_SET, RESOLVER, ANY);
+
+static MODTYPE : ValueS = TUPLE!("module_type_body", MP, NOIMPL, SIGN, OPT!(MEXPR), CONTEXT_SET, RESOLVER, ANY);
+
+/* kernel/safe_typing */
+
+static VODIGEST : ValueS = SUM!("module_impl", 0, [STRING], [STRING, STRING]);
+
+static DEPS : ValueS = ARRAY!(TUPLE!("dep", DP, VODIGEST));
+
+static COMPILED_LIB : ValueS = TUPLE!("compiled", DP, MODULE, DEPS, ENGAGEMENT, ANY);
+
+/* Library objects */
+
+static OBJ : ValueS = Value::Dyn;
+
+static LIBOBJ : ValueS = TUPLE!("libobj", ID, OBJ);
+
+static LIBOBJS : ValueS = LIST!(LIBOBJ);
+
+static LIBRARYOBJS : ValueS = TUPLE!("library_objects", LIBOBJS, LIBOBJS);
+
+// STM objects
+
+// static FROZEN : ValueS = TUPLE!("frozen", LIST!(PAIR!(INT, DYN)), OPT!(DYN));
+//
+// static STATES : ValueS = PAIR!(ANY, FROZEN);
+//
+// static STATE : ValueS = TUPLE!("state", STATES, ANY, BOOL);
+
+/* static VCS : ValueS = {
+    static DATA : ValueS = OPT!(ANY);
+    static MP_MAP : ValueS = MAP!(MP_MAP, ANY, TUPLE!("state_info",
+        ANY, ANY, OPT!(STATE), PAIR!(DATA, ANY))
+    );
+    //
+    // module Make(OT : Map.OrderedType) = struct
+    //
+    // type id = OT.t
+    //
+    //
+    //
+    // Vcs.Make(Stateid.Self)
+    //
+    // module Branch : (module type of Vcs_.Branch with type t = Vcs_.Branch.t)
+    // type id = Stateid.t
+    // type 'branch_type branch_info = 'branch_type Vcs_.branch_info = {
+    //   kind : [> `Master] as 'branch_type;
+    //   root : id;
+    //   pos  : id;
+    // }
+    //
+    TUPLE!("vcs", ANY, ANY, TUPLE!("dag", ANY, ANY, MP_MAP)) // (branch_type, transaction, vcs_state_info, box) Vcs_.t
+} */
+/*
+
+(** STM objects *)
+
+let v_frozen = Tuple ("frozen", [|List (v_pair Int Dyn); Opt Dyn|])
+let v_states = v_pair Any v_frozen
+let v_state = Tuple ("state", [|v_states; Any; v_bool|])
+
+let v_vcs =
+  let data = Opt Any in
+  let vcs =
+    Tuple ("vcs",
+      [|Any; Any;
+        Tuple ("dag",
+          [|Any; Any; v_map Any (Tuple ("state_info",
+            [|Any; Any; Opt v_state; v_pair data Any|]))
+          |])
+      |])
+  in
+  let () = Obj.set_field (Obj.magic data) 0 (Obj.magic vcs) in
+  vcs
+
+let v_uuid = Any
+let v_request id doc =
+  Tuple ("request", [|Any; Any; doc; Any; id; String|])
+let v_tasks = List (v_pair (v_request v_uuid v_vcs) v_bool)
+let v_counters = Any
+let v_stm_seg = v_pair v_tasks v_counters
+*/
+
+/* Toplevel structures in a vo (see Cic.mli) */
+
+pub static LIBSUM : ValueS = TUPLE!("summary", DP, ARRAY!(DP), DEPS);
+
+pub static LIB : ValueS = TUPLE!("library", COMPILED_LIB, LIBRARYOBJS);
+
+static OPAQUES : ValueS = COMPUTATION!(CONSTR);
+
+static UNIVOPAQUES : ValueS = OPT!(TUPLE!("univopaques", ARRAY!(COMPUTATION!(CONTEXT_SET)), CONTEXT_SET, BOOL));
+
+
+/*(** Registering dynamic values *)
+
+module IntOrd =
+struct
+  type t = int
+  let compare (x : t) (y : t) = compare x y
+end
+
+module IntMap = Map.Make(IntOrd)
+
+let dyn_table : value IntMap.t ref = ref IntMap.empty
+
+let register_dyn name t =
+  dyn_table := IntMap.add name t !dyn_table
+
+let find_dyn name =
+  try IntMap.find name !dyn_table
+  with Not_found -> Any*/
 
 /*
 
@@ -91,9 +538,9 @@ let v_cons = v_tuple "constructor" [|v_ind;Int|]
 
 (** kernel/univ *)
 
-let v_raw_level = v_sum "raw_level" 2 (* Prop, Set *) 
+let v_raw_level = v_sum "raw_level" 2 (* Prop, Set *)
   [|(*Level*)[|Int;v_dp|]; (*Var*)[|Int|]|]
-let v_level = v_tuple "level" [|Int;v_raw_level|] 
+let v_level = v_tuple "level" [|Int;v_raw_level|]
 let v_expr = v_tuple "levelexpr" [|v_level;Int|]
 let rec v_univ = Sum ("universe", 1, [| [|v_expr; Int; v_univ|] |])
 
@@ -115,7 +562,7 @@ let v_sortfam = v_enum "sorts_family" 3
 
 let v_puniverses v = v_tuple "punivs" [|v;v_instance|]
 
-let v_boollist = List v_bool  
+let v_boollist = List v_bool
 
 let v_caseinfo =
   let v_cstyle = v_enum "case_style" 5 in
@@ -248,7 +695,7 @@ let v_one_ind = v_tuple "one_inductive_body"
     Any|]
 
 let v_finite = v_enum "recursivity_kind" 3
-let v_mind_record = Annot ("mind_record", 
+let v_mind_record = Annot ("mind_record",
                            Opt (Opt (v_tuple "record" [| v_id; Array v_cst; Array v_projbody |])))
 
 let v_ind_pack = v_tuple "mutual_inductive_body"

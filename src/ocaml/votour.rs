@@ -119,6 +119,7 @@ fn display_stack(state : &State){
   let field = *peek(&state.pointer);
   let memory = state.memory;
   let size = get_size (field, state.objsize.as_ref());
+  // println!("{:?}", CONSTR);
   println!("{} (size {}w)", Closure(field, memory), size);
   match get_children(field, memory) {
     None => (),
