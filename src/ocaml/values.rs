@@ -2,13 +2,13 @@ type CowS<'a, T> = &'a T;
 type CowVec<'a, T> = CowS<'a, [T]>;
 type CowVec2<'a, T> = CowVec<'a, CowVec<'a, T>>;
 
-pub type ValueR<'a> = &'a Value<'a>;
+pub type ValueR<'a> = &'a ValueT<'a>;
 
 type CowVecV<'a> = CowVec<'a, ValueR<'a>>;
 type CowVecV2<'a> = CowVec2<'a, ValueR<'a>>;
 
 #[derive(PartialEq, Eq, Ord, PartialOrd, Copy, Clone, Debug)]
-pub enum Value<'a> {
+pub enum ValueT<'a> {
   Any,
   Fail(&'a str),
   Tuple(&'a str, CowVecV<'a>),
@@ -18,11 +18,11 @@ pub enum Value<'a> {
   Opt(ValueR<'a>),
   Int,
   String,
-  // Annot(String, Rc<Value<'a>>),
+  // Annot(String, Rc<ValueT<'a>>),
   Dyn,
 }
 
-type ValueS = Value<'static>;
+type ValueS = ValueT<'static>;
 
 macro_rules! B {
     ($e:expr) => {
@@ -38,37 +38,37 @@ macro_rules! CB {
 
 macro_rules! FAIL {
     ($e:expr) => {
-        Value::Fail(B!($e))
+        ValueT::Fail(B!($e))
     }
 }
 
 macro_rules! TUPLE {
     ($s:expr, $( $e:expr ),* ) => {
-        Value::Tuple($s, CB!($( B!($e) ),*))
+        ValueT::Tuple($s, CB!($( B!($e) ),*))
     }
 }
 
 macro_rules! SUM {
     ($s:expr, $i:expr, $( [ $( $e:expr ),* ] ),* ) => {
-        Value::Sum($s, $i, CB!($( CB!($( B!($e) ),*) ),*))
+        ValueT::Sum($s, $i, CB!($( CB!($( B!($e) ),*) ),*))
     }
 }
 
 macro_rules! LIST {
     ($e:expr) => {
-        Value::List(B!($e))
+        ValueT::List(B!($e))
     }
 }
 
 macro_rules! OPT {
     ($e:expr) => {
-        Value::Opt(B!($e))
+        ValueT::Opt(B!($e))
     }
 }
 
 macro_rules! ARRAY {
     ($e:expr) => {
-        Value::Array(B!($e))
+        ValueT::Array(B!($e))
     }
 }
 
@@ -87,7 +87,7 @@ macro_rules! PAIR {
 
 static BOOL : ValueS = ENUM!("bool", 2);
 
-static INT : ValueS = Value::Int;
+static INT : ValueS = ValueT::Int;
 
 macro_rules! REF {
     ($v:expr) => {
@@ -95,9 +95,9 @@ macro_rules! REF {
     }
 }
 
-static STRING : ValueS = Value::String;
-static ANY : ValueS = Value::Any;
-static DYN : ValueS = Value::Dyn;
+static STRING : ValueS = ValueT::String;
+static ANY : ValueS = ValueT::Any;
+static DYN : ValueS = ValueT::Dyn;
 
 macro_rules! SET {
     ($s:ident, $e:expr) => {
@@ -135,7 +135,7 @@ macro_rules! COMPUTATION {
 
 /* kernel/names */
 
-static ID : ValueS = Value::String;
+static ID : ValueS = ValueT::String;
 
 static DP : ValueS = LIST!(ID);
 
@@ -398,7 +398,7 @@ static COMPILED_LIB : ValueS = TUPLE!("compiled", DP, MODULE, DEPS, ENGAGEMENT, 
 
 /* Library objects */
 
-static OBJ : ValueS = Value::Dyn;
+static OBJ : ValueS = ValueT::Dyn;
 
 static LIBOBJ : ValueS = TUPLE!("libobj", ID, OBJ);
 

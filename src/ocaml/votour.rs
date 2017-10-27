@@ -59,7 +59,7 @@ fn compute_size(mem : &[Obj]) -> Box<[usize]> {
 }
 
 struct State<'a> {
-  context : Vec<&'a Value<'a>>,
+  context : Vec<&'a ValueT<'a>>,
   pointer : Vec<&'a Field>,
   memory : &'a [Obj],
   buffer : String,
@@ -211,7 +211,7 @@ fn visit_stack(state : &mut State){
   }
 }
 
-pub fn visit_object<'a>(ptr : &'a Field, mem : &'a [Obj], root : &'a Value<'a>) {
+pub fn visit_object<'a>(ptr : &'a Field, mem : &'a [Obj], root : &'a ValueT<'a>) {
   let size = compute_size(mem);
   let stack = vec!(root);
   let ptrs = vec!(ptr);

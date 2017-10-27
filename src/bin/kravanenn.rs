@@ -70,5 +70,5 @@ fn main () {
    }
    let (_, ref obj) = try_fatal!(ocaml::marshal::read_segment(&mut file));
    let ocaml::marshal::Memory(ref mem) = obj.memory;
-   ocaml::votour::visit_object(&obj.entry, mem, &ocaml::values::Value::Any);
+   ocaml::votour::visit_object(&obj.entry, mem, &ocaml::values::ValueT::Any);
 }
