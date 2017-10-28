@@ -1,4 +1,4 @@
-use ocaml::marshal::{Obj, RawString};
+use ocaml::marshal::{RawString};
 
 type CowS<'a, T> = &'a T;
 type CowVec<'a, T> = CowS<'a, [T]>;
@@ -126,6 +126,8 @@ static ANY : ValueS = ValueT::Any;
 pub struct Any;
 
 static DYN : ValueS = ValueT::Dyn;
+#[derive(Debug, Deserialize)]
+pub struct Dyn;
 
 macro_rules! SET {
     ($s:ident, $e:expr) => {
@@ -290,9 +292,12 @@ static INSTANCE : ValueS = ARRAY!(LEVEL);
 pub type Instance = Vec<Level>;
 
 static CONTEXT : ValueS = TUPLE!("universe_context", INSTANCE, CSTRS);
+#[derive(Debug, Deserialize)]
+pub struct Context(Instance, Cstrs);
 
 // static ABS_CONTEXT : ValueS = CONTEXT; // Only for clarity
 static ABS_CONTEXT : ValueS = TUPLE!("universe_context", INSTANCE, CSTRS); // Only for clarity
+pub type AbsContext = Context;
 
 // static ABS_CUM_INFO : ValueS = TUPLE!("cumulativity_info", ABS_CONTEXT, CONTEXT);
 
@@ -439,78 +444,179 @@ static RDECL : ValueS = SUM!("rel_declaration", 0,
     [NAME, CONSTR], // LocalAssum
     [NAME, CONSTR, CONSTR] // LocalDef
 );
+#[derive(Debug, Deserialize)]
+pub enum RDecl {
+    LocalDef(Name, Constr, Constr),
+    LocalAssum(Name, Constr),
+}
 
 static RCTXT : ValueS = LIST!(RDECL);
+pub type Rctxt = List<RDecl>;
 
 static SECTION_CTXT : ValueS = ENUM!("emptylist", 1);
-
+#[derive(Debug, Deserialize)]
+pub enum SectionCtxt {
+    Nil,
+}
 
 /* kernel/mod_subst */
 
 static DELTA_HINT : ValueS = SUM!("delta_hint", 0, [INT, OPT!(CONSTR)], [KN]);
+#[derive(Debug, Deserialize)]
+pub enum DeltaHint {
+    Equiv(Kn),
+    Inline(Int, Opt<Constr>),
+}
 
 static RESOLVER : ValueS = {
     static MP_MAP : ValueS = MAP!(MP_MAP, MP, MP);
     static KN_MAP : ValueS = HMAP!(KN_MAP, KN, DELTA_HINT);
     TUPLE!("delta_resolver", MP_MAP, KN_MAP)
 };
+#[derive(Debug, Deserialize)]
+pub struct Resolver(Map<Mp, Mp>, HMap<Kn, DeltaHint>);
 
 static MP_RESOLVER : ValueS = TUPLE!("", MP, RESOLVER);
+#[derive(Debug, Deserialize)]
+pub struct MpResolver(Mp, Resolver);
 
 static SUBST : ValueS = {
     static MP_MAP : ValueS = MAP!(MP_MAP, MP, MP_RESOLVER);
     static UID_MAP : ValueS = MAP!(UID_MAP, UID, MP_RESOLVER);
     TUPLE!("substitution", MP_MAP, UID_MAP)
 };
+#[derive(Debug, Deserialize)]
+pub struct Subst(Map<Mp, MpResolver>, Map<UId, MpResolver>);
 
 /* kernel/lazyconstr */
-
 
 macro_rules! SUBSTITUTED {
     ($a:expr) => {
         TUPLE!("substituted", $a, LIST!(SUBST))
     }
 }
+#[derive(Debug, Deserialize)]
+pub struct Substituted<T> {
+    value: T,
+    subst: List<Subst>,
+}
 
 static CSTR_SUBST : ValueS = SUBSTITUTED!(CONSTR);
+pub type CstrSubst = Substituted<Constr>;
 
 // NB: Second constructor [Direct] isn't supposed to appear in a .vo
 static LAZY_CONSTR : ValueS = SUM!("lazy_constr", 0, [LIST!(SUBST), DP, INT]);
+#[derive(Debug, Deserialize)]
+pub enum LazyConstr {
+    // Direct(CstrSubst),
+    Indirect(List<Subst>, Dp, Int),
+}
 
 /* kernel/declarations */
 
 // static IMPREDICATIVE_SET : ValueS = ENUM!("impr-set", 2);
 static ENGAGEMENT : ValueS = ENUM!("impr-set", 2); // IMPREDICATIVE_SET;
+#[derive(Debug, Deserialize)]
+pub enum Engagement {
+    ImpredicativeSet,
+    PredicativeSet,
+}
 
 static POL_ARITY : ValueS = TUPLE!("polymorphic_arity", LIST!(OPT!(LEVEL)), UNIV);
+#[derive(Debug, Deserialize)]
+pub struct PolArity {
+    param_levels: List<Opt<Level>>,
+    level: Univ,
+}
 
 static CST_TYPE : ValueS = SUM!("constant_type", 0, [CONSTR], [PAIR!(RCTXT, POL_ARITY)]);
+#[derive(Debug, Deserialize)]
+pub enum CstType {
+    TemplateArity((Rctxt, PolArity)),
+    RegularArity(Constr),
+}
 
 static CST_DEF : ValueS = SUM!("constant_def", 0, [OPT!(INT)], [CSTR_SUBST], [LAZY_CONSTR]);
+#[derive(Debug, Deserialize)]
+pub enum CstDef {
+    OpaqueDef(LazyConstr),
+    Def(CstrSubst),
+    Undef(Opt<Int>),
+}
 
 static PROJBODY : ValueS = TUPLE!("projection_body", CST, INT, INT, CONSTR, TUPLE!("proj_eta", CONSTR, CONSTR), CONSTR);
+#[derive(Debug, Deserialize)]
+pub struct ProjEta(Constr, Constr);
+#[derive(Debug, Deserialize)]
+pub struct ProjBody {
+    ind: Cst,
+    npars: Int,
+    arg: Int,
+    ty: Constr,
+    eta: ProjEta,
+    body: Constr,
+}
 
 static TYPING_FLAGS : ValueS = TUPLE!("typing_flags", BOOL, BOOL);
+#[derive(Debug, Deserialize)]
+pub struct TypingFlags {
+    check_guarded: Bool,
+    check_universes: Bool,
+}
 
 // static CONST_UNIVS : ValueS = SUM!("constant_universes", 0, [CONTEXT], [ABS_CONTEXT]);
 
 static CB : ValueS = TUPLE!("constant_body", SECTION_CTXT, CST_DEF, CST_TYPE, ANY, BOOL, CONTEXT, /*CONST_UNIVS,*/ OPT!(PROJBODY), BOOL, TYPING_FLAGS);
+#[derive(Debug, Deserialize)]
+pub struct Cb {
+    hyps: SectionCtxt,
+    body: CstDef,
+    ty: CstType,
+    body_code: Any,
+    polymorphic: Bool,
+    universes: Context,
+    proj: Opt<ProjBody>,
+    inline_code: Bool,
+    typing_flags: TypingFlags,
+}
 
 static RECARG : ValueS = SUM!("recarg",
     1, // Norec
     [IND], // Mrec
     [IND] // Imbr
 );
+#[derive(Debug, Deserialize)]
+pub enum RecArg {
+    Norec,
+    Imbr(Ind),
+    Mrec(Ind),
+}
 
 static WFP : ValueS = SUM!("wf_paths", 0,
     [INT, INT], // Rtree.Param
     [RECARG, ARRAY!(WFP)], // Rtree.Node
     [INT, ARRAY!(WFP)] // Rtree.Rec
 );
+#[derive(Debug, Deserialize)]
+pub enum Wfp {
+    Rec(Int, Vec<Wfp>),
+    Node(RecArg, Vec<Wfp>),
+    Param(Int, Int),
+}
 
 static MONO_IND_ARITY : ValueS = TUPLE!("monomorphic_inductive_arity", CONSTR, SORT);
+#[derive(Debug, Deserialize)]
+pub struct MonoIndArity {
+    user_arity: Constr,
+    sort: Sort
+}
 
 static IND_ARITY : ValueS = SUM!("inductive_arity", 0, [MONO_IND_ARITY], [POL_ARITY]);
+#[derive(Debug, Deserialize)]
+pub enum IndArity {
+    TemplateArity(PolArity),
+    RegularArity(MonoIndArity),
+}
 
 static ONE_IND : ValueS = TUPLE!("one_inductive_body",
     ID,
@@ -529,10 +635,37 @@ static ONE_IND : ValueS = TUPLE!("one_inductive_body",
     INT,
     ANY
 );
+#[derive(Debug, Deserialize)]
+pub struct OneInd {
+    typename: Id,
+    arity_ctxt: Rctxt,
+    arity: IndArity,
+    consnames: Vec<Id>,
+    user_lc: Vec<Constr>,
+    nrealargs: Int,
+    nrealdecls: Int,
+    kelim: List<SortFam>,
+    nf_lc: Vec<Constr>,
+    consnrealargs: Vec<Int>,
+    consnrealdecls: Vec<Int>,
+    recargs: Wfp,
+    nb_constant: Int,
+    nb_args: Int,
+    reloc_tbl: Any,
+}
 
 static FINITE : ValueS = ENUM!("recursivity_kind", 3);
+#[derive(Debug, Deserialize)]
+pub enum Finite {
+    Finite,
+    CoFinite,
+    BiFinite,
+}
 
 static MIND_RECORD : ValueS = OPT!(OPT!(TUPLE!("record", ID, ARRAY!(CST), ARRAY!(PROJBODY))));
+#[derive(Debug, Deserialize)]
+pub struct RecordBody(Id, Vec<Cst>, Vec<ProjBody>);
+type MindRecord = Opt<Opt<RecordBody>>;
 
 /* static IND_PACK_UNIVS : ValueS = SUM!("abstract_inductive_universes", 0,
     [CONTEXT],
@@ -553,17 +686,46 @@ static IND_PACK : ValueS = TUPLE!("mutual_inductive_body",
     OPT!(BOOL),
     TYPING_FLAGS
 );
+#[derive(Debug, Deserialize)]
+pub struct IndPack {
+    packets: Vec<OneInd>,
+    record: MindRecord,
+    finite: Finite,
+    ntypes: Int,
+    hyps: SectionCtxt,
+    nparams: Int,
+    nparams_rec: Int,
+    params_ctxt: Rctxt,
+    polymorphic: Bool,
+    universes: Context,
+    private: Opt<Bool>,
+    typing_flags: TypingFlags,
+}
 
 static WITH : ValueS = SUM!("with_declaration_body", 0,
     [LIST!(ID), MP],
     [LIST!(ID), TUPLE!("with_def", CONSTR, CONTEXT)]
 );
+#[derive(Debug, Deserialize)]
+pub struct WithDef(Constr, Context);
+
+#[derive(Debug, Deserialize)]
+pub enum With {
+    Def(List<Id>, WithDef),
+    Mod(List<Id>, Mp),
+}
 
 static MAE : ValueS = SUM!("module_alg_expr", 0,
     [MP], // SEBident
     [MAE, MP], // SEBapply
     [MAE, WITH] // SEBwith
 );
+#[derive(Debug, Deserialize)]
+pub enum Mae {
+    With(Box<Mae>, With),
+    Apply(Box<Mae>, Mp),
+    Ident(Mp),
+}
 
 static SFB : ValueS = SUM!("struct_field_body", 0,
     [CB], // SFBconst
@@ -571,29 +733,80 @@ static SFB : ValueS = SUM!("struct_field_body", 0,
     [MODULE], // SFBmodule
     [MODTYPE] // SFBmodtype
 );
+#[derive(Debug, Deserialize)]
+pub enum Sfb {
+    ModType(ModType),
+    Module(Module),
+    Mind(IndPack),
+    Const(Cb),
+}
 
 static STRUC : ValueS = LIST!(TUPLE!("label*sfb", ID, SFB));
+#[derive(Debug, Deserialize)]
+pub struct StructureBody(Id, Box<Sfb>);
+type Struc = List<StructureBody>;
 
 static SIGN : ValueS = SUM!("module_sign", 0,
     [STRUC], // NoFunctor
     [UID, MODTYPE, SIGN] // MoreFunctor
 );
+#[derive(Debug, Deserialize)]
+pub enum Sign {
+    MoreFunctor(UId, Box<ModType>, Box<Sign>),
+    NoFunctor(Struc),
+}
 
 static MEXPR : ValueS = SUM!("module_expr", 0,
     [MAE], // NoFunctor
     [UID, MODTYPE, MEXPR] // MoreFunctor
 );
+#[derive(Debug, Deserialize)]
+pub enum MExpr {
+    MoreFunctor(UId, Box<ModType>, Box<MExpr>),
+    NoFunctor(Mae),
+}
 
 static IMPL : ValueS = SUM!("module_impl", 2, // Abstract, FullStruct
     [MEXPR], // Algebraic
     [SIGN] // Struct
 );
+#[derive(Debug, Deserialize)]
+pub enum Impl {
+    Abstract,
+    FullStruct,
+    Struct(Sign),
+    Algebraic(MExpr),
+}
 
 static NOIMPL : ValueS = ENUM!("no_impl", 1); // Astract is mandatory for mtb
+#[derive(Debug, Deserialize)]
+pub enum NoImpl {
+    Abstract,
+}
 
 static MODULE : ValueS = TUPLE!("module_body", MP, IMPL, SIGN, OPT!(MEXPR), CONTEXT_SET, RESOLVER, ANY);
+#[derive(Debug, Deserialize)]
+pub struct Module {
+    mp: Mp,
+    expr: Impl,
+    ty: Sign,
+    type_alg: Opt<MExpr>,
+    constraints: ContextSet,
+    delta: Resolver,
+    retroknowledge: Any,
+}
 
 static MODTYPE : ValueS = TUPLE!("module_type_body", MP, NOIMPL, SIGN, OPT!(MEXPR), CONTEXT_SET, RESOLVER, ANY);
+#[derive(Debug, Deserialize)]
+pub struct ModType {
+    mp: Mp,
+    expr: NoImpl,
+    ty: Sign,
+    type_alg: Opt<MExpr>,
+    constraints: ContextSet,
+    delta: Resolver,
+    retroknowledge: Any,
+}
 
 /* kernel/safe_typing */
 
@@ -610,16 +823,33 @@ pub struct LibraryInfo(Dp, VoDigest);
 pub type Deps = Vec<LibraryInfo>;
 
 static COMPILED_LIB : ValueS = TUPLE!("compiled", DP, MODULE, DEPS, ENGAGEMENT, ANY);
+#[derive(Debug, Deserialize)]
+pub struct CompiledLib {
+    name: Dp,
+    module: Module,
+    deps: Deps,
+    enga: Engagement,
+    natsymbs: Any,
+}
 
 /* Library objects */
 
 static OBJ : ValueS = ValueT::Dyn;
+type Obj = Dyn;
 
 static LIBOBJ : ValueS = TUPLE!("libobj", ID, OBJ);
+#[derive(Debug, Deserialize)]
+pub struct LibObj(Id, Obj);
 
 static LIBOBJS : ValueS = LIST!(LIBOBJ);
+pub type LibObjs = List<LibObj>;
 
 static LIBRARYOBJS : ValueS = TUPLE!("library_objects", LIBOBJS, LIBOBJS);
+#[derive(Debug, Deserialize)]
+pub struct LibraryObjs {
+    compiled: LibObjs,
+    objects: LibObjs,
+}
 
 // STM objects
 
@@ -694,6 +924,11 @@ pub struct LibSum {
 }
 
 pub static LIB : ValueS = TUPLE!("library", COMPILED_LIB, LIBRARYOBJS);
+#[derive(Debug, Deserialize)]
+pub struct Lib {
+    compiled: CompiledLib,
+    objects: LibraryObjs,
+}
 
 static OPAQUES : ValueS = ARRAY!(COMPUTATION!(CONSTR));
 pub type Opaques = Vec<Computation<Constr>>;
