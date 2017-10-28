@@ -8,6 +8,8 @@ use std::fmt::{Display, LowerHex, Formatter};
 use std::{char};
 use self::byteorder::{ReadBytesExt, BigEndian};
 
+use fixedbitset::{FixedBitSet};
+
 static MARSHAL_MAGIC : u32 = 0x8495a6be;
 
 #[allow(dead_code)]
@@ -39,7 +41,8 @@ static PREFIX_SMALL_INT : u8 = 0x40;
 static PREFIX_SMALL_STRING : u8 = 0x20;
 static MAX_TAG : u8 = 0x13;
 
-pub struct RawString (Box<[u8]>);
+#[derive(Debug)]
+pub struct RawString (pub Box<[u8]>);
 
 impl Deref for RawString {
   type Target = Box<[u8]>;
@@ -62,6 +65,7 @@ impl Display for RawString {
   }
 }
 
+#[derive(Debug)]
 enum Object {
   Int (i64),
   Block (u8, usize),
@@ -70,6 +74,16 @@ enum Object {
   Code (u32),
 }
 
+impl Display for Obj {
+  fn fmt(&self, fmt : &mut Formatter) -> ::std::result::Result<(), std::fmt::Error> {
+      match *self {
+          Obj::String(ref s) => write!(fmt, "[str=\"{}\"]", s),
+          Obj::Block(tag, ref p) => write!(fmt, "[tag={}, fields.len={}]", tag, p.len()),
+      }
+  }
+}
+
+#[derive(Debug)]
 pub enum Field {
   Int (i64),
   Ref (usize),
@@ -77,6 +91,7 @@ pub enum Field {
   Atm (u8),
 }
 
+#[derive(Debug)]
 pub enum Obj {
   Block (u8, Box<[Field]>),
   String (RawString),
@@ -226,6 +241,7 @@ fn parse_object<T : Read>(file : &mut T) -> Result<Object> {
 //           Tag::TagDoubleArray32Little =>,
       Tag::TagBlock32 => {
         let obj = try!(parse_u32(file));
+        // println!("{:x} = obj, {:x} = tag", obj, obj & 0xFF);
         Ok (Object::Block((obj & 0xFF) as u8, (obj >> 10) as usize))
       },
       Tag::TagString8 => {
@@ -294,7 +310,10 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   let header = try!(parse_header(f));
   let mut mem = Vec::with_capacity(header.objects);
   let mut stack = Vec::with_capacity(1 + header.objects);
+  let mut bits = FixedBitSet::with_capacity(1 + header.objects);
   let mut cur : usize = 0;
+  let mut total = 0;
+  let mut share = 0;
 //   println!("Reading data.");
   {
     // Dummy initial block
@@ -318,6 +337,12 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
     {
       let len = stack.len();
       let top = &mut stack[len - 1];
+      if let Field::Ref(p) = field {
+          total += 1;
+          if bits.put(p) {
+              share += 1;
+          }
+      }
       top.object.add(field);
     }
     // Store the object in the memory or in the stack if non-scalar
@@ -341,6 +366,7 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
     let finished = rebuild_stack(&mut stack, &mut mem);
     if finished { break; };
   }
+  println!("Memory sharing in effect: share={:?} / total={:?}", share, total);
 //   println!("Done.");
   let mut entry = stack.pop().unwrap();
   let entry = entry.object.pop().unwrap();

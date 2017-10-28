@@ -1,3 +1,5 @@
+use ocaml::marshal::{Obj, RawString};
+
 type CowS<'a, T> = &'a T;
 type CowVec<'a, T> = CowS<'a, [T]>;
 type CowVec2<'a, T> = CowVec<'a, CowVec<'a, T>>;
@@ -41,6 +43,7 @@ macro_rules! FAIL {
         ValueT::Fail(B!($e))
     }
 }
+pub type Fail = u8;
 
 macro_rules! TUPLE {
     ($s:expr, $( $e:expr ),* ) => {
@@ -59,12 +62,23 @@ macro_rules! LIST {
         ValueT::List(B!($e))
     }
 }
+#[derive(Debug, Deserialize)]
+pub enum List<T> {
+    Nil,
+    Cons(T, Box<List<T>>),
+}
 
 macro_rules! OPT {
     ($e:expr) => {
         ValueT::Opt(B!($e))
     }
 }
+/*#[derive(Deserialize, Debug)]
+pub enum Opt<T> {
+    None,
+    Some(T)
+} */
+pub type Opt<T> = Option<T>;
 
 macro_rules! ARRAY {
     ($e:expr) => {
@@ -86,17 +100,31 @@ macro_rules! PAIR {
 }
 
 static BOOL : ValueS = ENUM!("bool", 2);
+/* #[derive(Deserialize, Debug)]
+pub enum Bool {
+    False,
+    True
+} */
+pub type Bool = bool;
 
 static INT : ValueS = ValueT::Int;
+pub type Int = i64;
 
 macro_rules! REF {
     ($v:expr) => {
         TUPLE!("ref", $v)
     }
 }
+#[derive(Debug, Deserialize)]
+pub struct Ref<T>(T);
 
 static STRING : ValueS = ValueT::String;
+pub type Str = RawString;//Box<[u8]>;
+
 static ANY : ValueS = ValueT::Any;
+#[derive(Debug, Deserialize)]
+pub struct Any;
+
 static DYN : ValueS = ValueT::Dyn;
 
 macro_rules! SET {
@@ -117,6 +145,12 @@ macro_rules! HSET {
     }
 }
 
+#[derive(Debug,Deserialize)]
+pub enum HList<T> {
+    Nil,
+    Cons(T, Int, Box<HList<T>>),
+}
+
 macro_rules! HMAP {
     ($m:ident, $vk:expr, $vd:expr) => {
         {
@@ -132,40 +166,107 @@ macro_rules! COMPUTATION {
         REF!(SUM!("Future.comput", 0, [FAIL!("Future.ongoing")], [$f]))
     }
 }
+#[derive(Deserialize,Debug)]
+pub enum FutureComput<F> {
+    Done(F),
+    Ongoing(Fail),
+}
+
+pub type Computation<F> = Ref<FutureComput<F>>;
 
 /* kernel/names */
 
 static ID : ValueS = ValueT::String;
+pub type Id = Str;
 
 static DP : ValueS = LIST!(ID);
+pub type Dp = List<Id>;
 
 static NAME : ValueS = SUM!("name", 1, [ID]);
+#[derive(Debug, Deserialize)]
+pub enum Name {
+    Anonymous, // anonymous identifier
+    Name(Id), // non-anonymous identifier
+}
 
 static UID : ValueS = TUPLE!("uniq_ident", INT, STRING, DP);
+#[derive(Debug, Deserialize)]
+pub struct UId(Int, Str, Dp);
 
 static MP : ValueS = SUM!("module_path", 0, [DP], [UID], [MP, ID]);
+#[derive(Debug, Deserialize)]
+pub enum Mp {
+    Dot(Box<Mp>, Id),
+    Bound(UId),
+    File(Dp),
+}
 
 static KN : ValueS = TUPLE!("kernel_name", ANY, MP, DP, ID, INT);
+#[derive(Debug, Deserialize)]
+pub struct Kn {
+    canary: Any,
+    modpath: Mp,
+    dirpath: Dp,
+    knlabel: Id,
+    refhash: Int,
+}
 
 static CST : ValueS = SUM!("cst|mind", 0, [KN], [KN, KN]);
+#[derive(Debug, Deserialize)]
+pub enum Cst {
+    Dual(Kn, Kn), // user then canonical
+    Same(Kn), // user = canonical
+}
 
 static IND : ValueS = TUPLE!("inductive", CST, INT);
+#[derive(Debug, Deserialize)]
+pub struct Ind {
+    /// the name of the inductive type
+    name: Cst,
+    /// The position of the inductive type within the block of mutually-recursive types.
+    /// Beware: indexing starts from 0.
+    pos: Int,
+}
 
 static CONS : ValueS = TUPLE!("constructor", IND, INT);
+/// Designation of a (particular) constructor of a (particular) inductive type.
+#[derive(Debug, Deserialize)]
+pub struct Cons {
+    /// designates the inductive type
+    ind: Ind,
+    /// The index of the constructor.  Beware: indexing starts from 1.
+    idx: Int,
+}
 
 /* kernel/univ */
 
 static RAW_LEVEL : ValueS = SUM!("raw_level", 2 /* Prop, Set */, /*Level*/[INT, DP], /*Var*/[INT]);
+#[derive(Debug, Deserialize)]
+pub enum RawLevel {
+    Prop,
+    Set,
+    Var(Int),
+    Level(Int, Dp),
+}
 
 static LEVEL : ValueS = TUPLE!("level", INT, RAW_LEVEL);
+#[derive(Debug,Deserialize)]
+pub struct Level {
+    hash: Int,
+    data: RawLevel,
+}
 
 static EXPR : ValueS = TUPLE!("levelexpr", LEVEL, INT);
+#[derive(Debug, Deserialize)]
+pub struct Expr(Level, Int);
 
 static UNIV : ValueS = SUM!("universe", 1, [EXPR, INT, UNIV]);
+pub type Univ = HList<Expr>;
 
 static CSTRS : ValueS = SET!(CSTRS, TUPLE!("univ_constraint", LEVEL, ENUM!("order_request", 3), LEVEL));
 
 static INSTANCE : ValueS = ARRAY!(LEVEL);
+pub type Instance = Vec<Level>;
 
 static CONTEXT : ValueS = TUPLE!("universe_context", INSTANCE, CSTRS);
 
@@ -181,16 +282,36 @@ static CONTEXT_SET : ValueS = {
 
 /* kernel/term */
 static SORT : ValueS = SUM!("sort", 0, [ENUM!("cnt", 2)], [UNIV]);
+#[derive(Debug,Deserialize)]
+pub enum SortContents {
+    Pos,
+    Null,
+}
+
+#[derive(Debug,Deserialize)]
+pub enum Sort {
+    Type(Univ),
+    Prop(SortContents),
+}
 
 static SORTFAM : ValueS = ENUM!("sorts_family", 3);
+#[derive(Debug,Deserialize)]
+pub enum SortFam {
+    InProp,
+    InSet,
+    InType,
+}
 
 macro_rules! PUNIVERSES {
     ($v:expr) => {
         TUPLE!("punivs", $v, INSTANCE)
     }
 }
+#[derive(Debug,Deserialize)]
+pub struct PUniverses<T>(T, Instance);
 
 static BOOLLIST : ValueS = LIST!(BOOL);
+pub type BoolList = List<Bool>;
 
 static CASEINFO : ValueS = {
     static CSTYLE : ValueS = ENUM!("case_style", 5);
@@ -198,9 +319,43 @@ static CASEINFO : ValueS = {
     TUPLE!("case_info", IND, INT, ARRAY!(INT), ARRAY!(INT), CPRINT)
 };
 
+#[derive(Deserialize, Debug)]
+pub enum CStyle {
+    Let,
+    If,
+    LetPattern,
+    Match,
+    Regular, // infer printing form from number of constructor
+}
+
+#[derive(Deserialize, Debug)]
+pub struct CPrint {
+    ind_tags: BoolList,
+    cstr_tags: Vec<BoolList>,
+    style: CStyle,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct CaseInfo {
+    ind: Ind,
+    npar: Int,
+    cstr_ndecls: Vec<Int>,
+    cstr_nargs: Vec<Int>,
+    cstr_pp_info: CPrint, // not interpreted by the kernel
+}
+
 static CAST : ValueS = ENUM!("cast_kind", 4);
+#[derive(Deserialize,Debug)]
+pub enum Cast {
+    VMCast,
+    NATIVECast,
+    DEFAULTCast,
+    RevertCast, // FIXME: Figure out why this is apparently appearing in the file?
+}
 
 static PROJ : ValueS = TUPLE!("projection", CST, BOOL);
+#[derive(Deserialize,Debug)]
+pub struct Proj(Cst, Bool);
 
 pub static CONSTR : ValueS = SUM!("constr", 0,
     [INT], // Rel
@@ -221,12 +376,40 @@ pub static CONSTR : ValueS = SUM!("constr", 0,
     [COFIX], // CoFix
     [PROJ, CONSTR] // Proj
 );
+#[derive(Deserialize,Debug)]
+pub enum Constr {
+    Proj(Proj, Box<Constr>),
+    CoFix(CoFix),
+    Fix(Fix),
+    Case(CaseInfo, Box<Constr>, Box<Constr>, Vec<Constr>),
+    Construct(PUniverses<Cons>),
+    Ind(PUniverses<Ind>),
+    Const(PUniverses<Cst>),
+    App(Box<Constr>, Vec<Constr>),
+    LetIn(Name, Box<Constr>, Box<Constr>, Box<Constr>),
+    Lambda(Name, Box<Constr>, Box<Constr>),
+    Prod(Name, Box<Constr>, Box<Constr>),
+    Cast(Box<Constr>, Cast, Box<Constr>),
+    Sort(Sort),
+    Evar(Fail),
+    Meta(Fail),
+    Var(Fail),
+    Rel(Int),
+}
 
 static PREC : ValueS = TUPLE!("prec_declaration", ARRAY!(NAME), ARRAY!(CONSTR), ARRAY!(CONSTR));
+#[derive(Deserialize, Debug)]
+pub struct PRec(Vec<Name>, Vec<Constr>, Vec<Constr>);
 
 static FIX : ValueS = TUPLE!("pfixpoint", TUPLE!("fix2", ARRAY!(INT), INT), PREC);
+#[derive(Deserialize, Debug)]
+pub struct Fix2(Vec<Int>, Int);
+#[derive(Deserialize, Debug)]
+pub struct Fix(Fix2, PRec);
 
 static COFIX : ValueS = TUPLE!("pcofixpoint", INT, PREC);
+#[derive(Deserialize,Debug)]
+pub struct CoFix(Int, PRec);
 
 static RDECL : ValueS = SUM!("rel_declaration", 0,
     [NAME, CONSTR], // LocalAssum
@@ -391,8 +574,16 @@ static MODTYPE : ValueS = TUPLE!("module_type_body", MP, NOIMPL, SIGN, OPT!(MEXP
 /* kernel/safe_typing */
 
 static VODIGEST : ValueS = SUM!("module_impl", 0, [STRING], [STRING, STRING]);
+#[derive(Debug, Deserialize)]
+pub enum VoDigest {
+    Dviovo(Str, Str),
+    Dvo(Str),
+}
 
 static DEPS : ValueS = ARRAY!(TUPLE!("dep", DP, VODIGEST));
+#[derive(Debug, Deserialize)]
+pub struct LibraryInfo(Dp, VoDigest);
+pub type Deps = Vec<LibraryInfo>;
 
 static COMPILED_LIB : ValueS = TUPLE!("compiled", DP, MODULE, DEPS, ENGAGEMENT, ANY);
 
@@ -471,13 +662,21 @@ let v_stm_seg = v_pair v_tasks v_counters
 /* Toplevel structures in a vo (see Cic.mli) */
 
 pub static LIBSUM : ValueS = TUPLE!("summary", DP, ARRAY!(DP), DEPS);
+#[derive(Debug,Deserialize)]
+pub struct LibSum {
+    name: Dp,
+    imports: Vec<Dp>,
+    deps: Deps,
+}
 
 pub static LIB : ValueS = TUPLE!("library", COMPILED_LIB, LIBRARYOBJS);
 
-static OPAQUES : ValueS = COMPUTATION!(CONSTR);
+static OPAQUES : ValueS = ARRAY!(COMPUTATION!(CONSTR));
+pub type Opaques = Vec<Computation<Constr>>;
 
 static UNIVOPAQUES : ValueS = OPT!(TUPLE!("univopaques", ARRAY!(COMPUTATION!(CONTEXT_SET)), CONTEXT_SET, BOOL));
 
+// pub type UnivOpaques = Opt<(Vec<Computation<ContextSet>>, ContextSet, Bool)>;
 
 /*(** Registering dynamic values *)
 
