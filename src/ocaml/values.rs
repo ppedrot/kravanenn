@@ -132,11 +132,21 @@ macro_rules! SET {
         SUM!("set", 1, [$s, $e, $s, INT])
    }
 }
+#[derive(Deserialize,Debug)]
+pub enum Set<V> {
+    Nil,
+    Node(Box<Set<V>>, V, Box<Set<V>>, Int),
+}
 
 macro_rules! MAP {
     ($m:ident, $vk:expr, $vd:expr) => {
         SUM!("map", 1, [$m, $vk, $vd, $m, INT])
    }
+}
+#[derive(Deserialize,Debug)]
+pub enum Map<K, V> {
+    Nil,
+    Node(Box<Map<K, V>>, K, V, Box<Map<K,V>>, Int),
 }
 
 macro_rules! HSET {
@@ -144,6 +154,7 @@ macro_rules! HSET {
         MAP!($s, INT, $v)
     }
 }
+pub type HSet<V> = Map<Int, Set<V>>;
 
 #[derive(Debug,Deserialize)]
 pub enum HList<T> {
@@ -159,6 +170,7 @@ macro_rules! HMAP {
         }
    }
 }
+pub type HMap<K, V> = Map<Int, Map<K, V>>;
 
 /* lib/future */
 macro_rules! COMPUTATION {
@@ -264,6 +276,15 @@ static UNIV : ValueS = SUM!("universe", 1, [EXPR, INT, UNIV]);
 pub type Univ = HList<Expr>;
 
 static CSTRS : ValueS = SET!(CSTRS, TUPLE!("univ_constraint", LEVEL, ENUM!("order_request", 3), LEVEL));
+#[derive(Debug, Deserialize)]
+enum ConstraintType {
+    Lt,
+    Le,
+    Eq,
+}
+#[derive(Debug, Deserialize)]
+pub struct UnivConstraint(Level, ConstraintType, Level);
+pub type Cstrs = Set<UnivConstraint>;
 
 static INSTANCE : ValueS = ARRAY!(LEVEL);
 pub type Instance = Vec<Level>;
@@ -279,6 +300,9 @@ static CONTEXT_SET : ValueS = {
     static LEVEL_SET : ValueS = HSET!(LEVEL_SET, LEVEL);
     TUPLE!("universe_context_set", LEVEL_SET, CSTRS)
  };
+pub type LevelSet = HSet<Level>;
+#[derive(Debug,Deserialize)]
+pub struct ContextSet(LevelSet, Cstrs);
 
 /* kernel/term */
 static SORT : ValueS = SUM!("sort", 0, [ENUM!("cnt", 2)], [UNIV]);
@@ -676,7 +700,9 @@ pub type Opaques = Vec<Computation<Constr>>;
 
 static UNIVOPAQUES : ValueS = OPT!(TUPLE!("univopaques", ARRAY!(COMPUTATION!(CONTEXT_SET)), CONTEXT_SET, BOOL));
 
-// pub type UnivOpaques = Opt<(Vec<Computation<ContextSet>>, ContextSet, Bool)>;
+#[derive(Debug,Deserialize)]
+pub struct UnivTable(Vec<Computation<ContextSet>>, ContextSet, Bool);
+pub type UnivOpaques = Opt<UnivTable>;
 
 /*(** Registering dynamic values *)
 
