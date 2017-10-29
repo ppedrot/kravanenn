@@ -5,7 +5,6 @@ use std::io;
 use std::io::{Write, Seek, SeekFrom};
 use std::str::FromStr;
 use kravanenn::*;
-use kravanenn::ocaml::marshal::{Header};
 use kravanenn::ocaml::values::{Opaques, LibSum, Any, UnivOpaques, Lib};
 
 macro_rules! try_fatal {
@@ -41,9 +40,7 @@ fn main () {
     n = n + 1;
   };
    let mut buf = String::new();
-   let mut n : usize;
    let n;
-   let segment;
    loop {
      print!("# ");
      let _ = io::stdout().flush();
@@ -56,9 +53,8 @@ fn main () {
      // Remove the EOL
      let _ = buf.pop();
      if let Ok(n_) = usize::from_str(&mut buf) {
-         if let Some(obj) = segments.get(n_) {
+         if segments.get(n_).is_some() {
             n = n_;
-            segment = obj;
             break
         }
      }
@@ -83,5 +79,5 @@ fn main () {
    println!("tasks: {:?}", if let Ok(None) = tasks { true } else { false });
    println!("table: {:?}, {:?}", table.is_ok(), format!("{:?}", table).len());
    let ocaml::marshal::Memory(ref mem) = obj.memory;
-   ocaml::votour::visit_object(&obj.entry, mem, &ocaml::values::ValueT::Any);
+   ocaml::votour::visit_object(&obj.entry, mem);
 }

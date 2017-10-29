@@ -34,6 +34,6 @@ fn main () {
   for i in 0..segments.len() {
     println!("Reading segment {}", i);
     let (_, seg) = try_fatal!(marshal::read_segment(&mut file));
-    let seg = compact::reduce(&seg);
+    let _ = compact::reduce(&seg);
   }
 }

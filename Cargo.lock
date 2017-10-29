@@ -4,6 +4,7 @@ version = "0.0.1"
 dependencies = [
  "byteorder 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "fixedbitset 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
+ "light_arena 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.16 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_derive 1.0.16 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
@@ -16,6 +17,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "fixedbitset"
 version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "light_arena"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
@@ -73,6 +79,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [metadata]
 "checksum byteorder 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)" = "0fc10e8cc6b2580fda3f36eb6dc5316657f812a3df879a44a66fc9f0fdbc4855"
 "checksum fixedbitset 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)" = "85cb8fec437468d86dc7c83ca7cfc933341d561873275f22dd5eedefa63a6478"
+"checksum light_arena 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "a886ce2358566386500ec04e26a490e3033a5d8452747559bdaaa4955030bbc6"
 "checksum quote 0.3.15 (registry+https://github.com/rust-lang/crates.io-index)" = "7a6e920b65c65f10b2ae65c831a81a073a89edd28c7cce89475bff467ab4167a"
 "checksum serde 1.0.16 (registry+https://github.com/rust-lang/crates.io-index)" = "e11a631f964d4e6572712ea12075fb1d65eeef42b0058884195b430ac1e26809"
 "checksum serde_derive 1.0.16 (registry+https://github.com/rust-lang/crates.io-index)" = "1a51d54c805fbc8e12b603d1ba51eaed3195862976be468888ab0e4995d0000e"

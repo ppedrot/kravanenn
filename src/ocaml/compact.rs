@@ -47,7 +47,7 @@ fn quotient(obj : &ObjRepr, partition : &Partition<StateT>) -> ObjRepr {
   let mem = Vec::with_capacity(partition.len());
   // Fill the memory in two passes, to ensure we get the pointers right
   // First construct the structures.
-  for p in partition.into_iter() {
+  for _p in partition.into_iter() {
   // TODO: implement memory translation
   }
   let entry = match obj.entry {
