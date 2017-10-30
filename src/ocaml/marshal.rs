@@ -83,7 +83,7 @@ impl Display for Obj {
   }
 }
 
-#[derive(Debug)]
+#[derive(Copy,Clone,Debug)]
 pub enum Field {
   Int (i64),
   Ref (usize),

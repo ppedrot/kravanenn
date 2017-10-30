@@ -58,14 +58,14 @@ fn compute_size(mem : &[Obj]) -> Box<[usize]> {
 }
 
 pub struct State<'a> {
-  pointer : Vec<&'a Field>,
+  pointer : Vec<Field>,
   memory : &'a [Obj],
   buffer : String,
   objsize : Box<[usize]>,
 }
 
-fn get_children<'a, 'b>(field : &'a Field, memory : &'b [Obj]) -> Option<&'b [Field]>{
-  match *field {
+fn get_children<'b>(field : Field, memory : &'b [Obj]) -> Option<&'b [Field]>{
+  match field {
     Field::Ref (p) => {
       match memory[p] {
         Obj::String(..) => None,
@@ -76,20 +76,20 @@ fn get_children<'a, 'b>(field : &'a Field, memory : &'b [Obj]) -> Option<&'b [Fi
   }
 }
 
-fn get_size(field : &Field, objsize : &[usize]) -> usize {
-  match *field {
+fn get_size(field : Field, objsize : &[usize]) -> usize {
+  match field {
     Field::Ref(p) => objsize[p],
     _ => 0,
   }
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct Closure<'a> (pub &'a Field, pub &'a [Obj]);
+pub struct Closure<'a> (pub Field, pub &'a [Obj]);
 
 impl <'a> Display for Closure<'a> {
   fn fmt(&self, fmt : &mut Formatter) -> Result<(), Error> {
     let Closure(field, memory) = *self;
-    match *field {
+    match field {
       Field::Int (n) => {
         write!(fmt, "[int={}]", n)
       },
@@ -121,8 +121,8 @@ fn display_stack(state : &State){
       println!("-------------");
       let mut n = 0;
       for i in block.iter() {
-        let size = get_size (i, state.objsize.as_ref());
-        println!("  {}: {} (size {}w)", n, Closure(i, memory), size);
+        let size = get_size (*i, state.objsize.as_ref());
+        println!("  {}: {} (size {}w)", n, Closure(*i, memory), size);
         n = n + 1;
       };
       println!("-------------");
@@ -156,7 +156,7 @@ fn perform_up(state : &mut State) {
 }
 
 fn perform_down(state : &mut State, n : usize) {
-  let block = match **peek(&state.pointer) {
+  let block = match *peek(&state.pointer) {
     Field::Ref (p) => {
       match state.memory[p] {
         Obj::String(..) => {
@@ -172,7 +172,7 @@ fn perform_down(state : &mut State, n : usize) {
     },
   };
   if n < block.len() {
-    let ptr = &block[n];
+    let ptr = block[n];
     state.pointer.push(ptr);
   } else {
     println!("No such children.");
@@ -205,7 +205,7 @@ fn visit_stack(state : &mut State){
   }
 }
 
-pub fn visit_object<'a>(ptr : &'a Field, mem : &'a [Obj]) {
+pub fn visit_object<'a>(ptr : Field, mem : &'a [Obj]) {
   let size = compute_size(mem);
   let ptrs = vec!(ptr);
   let buf = String::new();

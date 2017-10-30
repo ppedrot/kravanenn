@@ -1,11 +1,14 @@
-use ocaml::marshal::{RawString};
+use ocaml::de::{Array, ORef, Str, Seed};
+use serde;
 
 pub type Fail = u8;
 
-#[derive(Debug, Deserialize)]
-pub enum List<T> {
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
+pub enum List<T> where T: 'static {
     Nil,
-    Cons(T, Box<List<T>>),
+    Cons(#[serde(deserialize_state)] T, #[serde(deserialize_state)] ORef<List<T>>),
 }
 
 pub type Opt<T> = Option<T>;
@@ -16,44 +19,56 @@ pub type Bool = bool;
 
 pub type Int = i64;
 
-#[derive(Debug, Deserialize)]
-pub struct Ref<T>(T);
+#[derive(Debug, DeserializeState)]
+#[serde(de_parameters = "S")]
+#[serde(deserialize_state = "S")]
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, S>"))]
+pub struct Ref<T>(#[serde(deserialize_state)] T);
 
-pub type Str = RawString;//Box<[u8]>;
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Any;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Dyn;
 
-#[derive(Deserialize,Debug)]
-pub enum Set<V> {
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+#[serde(bound(deserialize = "V: serde::de::DeserializeState<'de, Seed<'de>>"))]
+pub enum Set<V> where V: 'static {
     Nil,
-    Node(Box<Set<V>>, V, Box<Set<V>>, Int),
+    Node(#[serde(deserialize_state)] ORef<Set<V>>, #[serde(deserialize_state)] V, #[serde(deserialize_state)] ORef<Set<V>>, Int),
 }
 
-#[derive(Deserialize,Debug)]
-pub enum Map<K, V> {
+#[derive(DeserializeState,Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
+#[serde(bound(deserialize = "K: serde::de::DeserializeState<'de, Seed<'de>>, V: serde::de::DeserializeState<'de, Seed<'de>>"))]
+pub enum Map<K, V> where K: 'static, V: 'static {
     Nil,
-    Node(Box<Map<K, V>>, K, V, Box<Map<K,V>>, Int),
+    Node(#[serde(deserialize_state)] ORef<Map<K, V>>,  #[serde(deserialize_state)] K,  #[serde(deserialize_state)] V, #[serde(deserialize_state)] ORef<Map<K, V>>, Int),
 }
 
 pub type HSet<V> = Map<Int, Set<V>>;
 
-#[derive(Debug,Deserialize)]
-pub enum HList<T> {
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
+pub enum HList<T> where T: 'static {
     Nil,
-    Cons(T, Int, Box<HList<T>>),
+    Cons(#[serde(deserialize_state)] T, Int, #[serde(deserialize_state)] ORef<HList<T>>),
 }
 
 pub type HMap<K, V> = Map<Int, Map<K, V>>;
 
 /* lib/future */
 
-#[derive(Deserialize,Debug)]
+#[derive(DeserializeState,Debug)]
+#[serde(de_parameters = "S")]
+#[serde(deserialize_state = "S")]
+#[serde(bound(deserialize = "F: serde::de::DeserializeState<'de, S>"))]
 pub enum FutureComput<F> {
-    Done(F),
+    Done(#[serde(deserialize_state)] F),
     Ongoing(Fail),
 }
 
@@ -65,127 +80,149 @@ pub type Id = Str;
 
 pub type Dp = List<Id>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(de_parameters = "S")]
+#[serde(deserialize_state = "S")]
+#[serde(bound(deserialize = "Str: serde::de::DeserializeState<'de, S>"))]
 pub enum Name {
     Anonymous, // anonymous identifier
-    Name(Id), // non-anonymous identifier
+    Name(#[serde(deserialize_state)] Id), // non-anonymous identifier
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UId(Int, Str, Dp);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct UId(Int, #[serde(deserialize_state)] Str, #[serde(deserialize_state)] Dp);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Mp {
-    Dot(Box<Mp>, Id),
-    Bound(UId),
-    File(Dp),
+    Dot(#[serde(deserialize_state)] ORef<Mp>, #[serde(deserialize_state)] Id),
+    Bound(#[serde(deserialize_state)] UId),
+    File(#[serde(deserialize_state)] Dp),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Kn {
-    canary: Any,
-    modpath: Mp,
-    dirpath: Dp,
-    knlabel: Id,
+    #[serde(deserialize_state)] canary: Any,
+    #[serde(deserialize_state)] modpath: Mp,
+    #[serde(deserialize_state)] dirpath: Dp,
+    #[serde(deserialize_state)] knlabel: Id,
     refhash: Int,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Cst {
-    Dual(Kn, Kn), // user then canonical
-    Same(Kn), // user = canonical
+    Dual(#[serde(deserialize_state)] Kn, #[serde(deserialize_state)] Kn), // user then canonical
+    Same(#[serde(deserialize_state)] Kn), // user = canonical
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Ind {
     /// the name of the inductive type
-    name: Cst,
+    #[serde(deserialize_state)] name: Cst,
     /// The position of the inductive type within the block of mutually-recursive types.
     /// Beware: indexing starts from 0.
     pos: Int,
 }
 
 /// Designation of a (particular) constructor of a (particular) inductive type.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Cons {
     /// designates the inductive type
-    ind: Ind,
+    #[serde(deserialize_state)] ind: Ind,
     /// The index of the constructor.  Beware: indexing starts from 1.
     idx: Int,
 }
 
 /* kernel/univ */
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum RawLevel {
     Prop,
     Set,
     Var(Int),
-    Level(Int, Dp),
+    Level(Int, #[serde(deserialize_state)] Dp),
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Level {
     hash: Int,
-    data: RawLevel,
+    #[serde(deserialize_state)] data: RawLevel,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Expr(Level, Int);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct Expr(#[serde(deserialize_state)] Level, Int);
 
 pub type Univ = HList<Expr>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 enum ConstraintType {
     Lt,
     Le,
     Eq,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct UnivConstraint(Level, ConstraintType, Level);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct UnivConstraint(#[serde(deserialize_state)] Level, #[serde(deserialize_state)] ConstraintType, #[serde(deserialize_state)] Level);
 
 pub type Cstrs = Set<UnivConstraint>;
 
-pub type Instance = Vec<Level>;
+pub type Instance = Array<Level>;
 
-#[derive(Debug, Deserialize)]
-pub struct Context(Instance, Cstrs);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct Context(#[serde(deserialize_state)] Instance, #[serde(deserialize_state)] Cstrs);
 
 pub type AbsContext = Context;
 
 // static ABS_CUM_INFO : ValueS = TUPLE!("cumulativity_info", ABS_CONTEXT, CONTEXT);
 
 pub type LevelSet = HSet<Level>;
-#[derive(Debug,Deserialize)]
-pub struct ContextSet(LevelSet, Cstrs);
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct ContextSet(#[serde(deserialize_state)] LevelSet, #[serde(deserialize_state)] Cstrs);
 
 /* kernel/term */
-#[derive(Debug,Deserialize)]
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum SortContents {
     Pos,
     Null,
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Sort {
-    Type(Univ),
-    Prop(SortContents),
+    Type(#[serde(deserialize_state)] Univ),
+    Prop(#[serde(deserialize_state)] SortContents),
 }
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum SortFam {
     InProp,
     InSet,
     InType,
 }
 
-#[derive(Debug,Deserialize)]
-pub struct PUniverses<T>(T, Instance);
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
+pub struct PUniverses<T>(#[serde(deserialize_state)] T, #[serde(deserialize_state)] Instance);
 
 pub type BoolList = List<Bool>;
 
-#[derive(Deserialize, Debug)]
+#[derive(DeserializeState, Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum CStyle {
     Let,
     If,
@@ -194,23 +231,26 @@ pub enum CStyle {
     Regular, // infer printing form from number of constructor
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(DeserializeState, Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct CPrint {
-    ind_tags: BoolList,
-    cstr_tags: Vec<BoolList>,
-    style: CStyle,
+    #[serde(deserialize_state)] ind_tags: BoolList,
+    #[serde(deserialize_state)] cstr_tags: Array<BoolList>,
+    #[serde(deserialize_state)] style: CStyle,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(DeserializeState, Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct CaseInfo {
-    ind: Ind,
+    #[serde(deserialize_state)] ind: Ind,
     npar: Int,
-    cstr_ndecls: Vec<Int>,
-    cstr_nargs: Vec<Int>,
-    cstr_pp_info: CPrint, // not interpreted by the kernel
+    #[serde(deserialize_state)] cstr_ndecls: Array<Int>,
+    #[serde(deserialize_state)] cstr_nargs: Array<Int>,
+    #[serde(deserialize_state)] cstr_pp_info: CPrint, // not interpreted by the kernel
 }
 
-#[derive(Deserialize,Debug)]
+#[derive(DeserializeState,Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Cast {
     VMCast,
     NATIVECast,
@@ -218,131 +258,154 @@ pub enum Cast {
     RevertCast, // FIXME: Figure out why this is apparently appearing in the file?
 }
 
-#[derive(Deserialize,Debug)]
-pub struct Proj(Cst, Bool);
+#[derive(DeserializeState,Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct Proj(#[serde(deserialize_state)] Cst, Bool);
 
-#[derive(Deserialize,Debug)]
+#[derive(DeserializeState,Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Constr {
-    Proj(Proj, Box<Constr>),
-    CoFix(CoFix),
-    Fix(Fix),
-    Case(CaseInfo, Box<Constr>, Box<Constr>, Vec<Constr>),
-    Construct(PUniverses<Cons>),
-    Ind(PUniverses<Ind>),
-    Const(PUniverses<Cst>),
-    App(Box<Constr>, Vec<Constr>),
-    LetIn(Name, Box<Constr>, Box<Constr>, Box<Constr>),
-    Lambda(Name, Box<Constr>, Box<Constr>),
-    Prod(Name, Box<Constr>, Box<Constr>),
-    Cast(Box<Constr>, Cast, Box<Constr>),
-    Sort(Sort),
+    Proj(#[serde(deserialize_state)] Proj, #[serde(deserialize_state)] ORef<Constr>),
+    CoFix(#[serde(deserialize_state)] CoFix),
+    Fix(#[serde(deserialize_state)] Fix),
+    Case(#[serde(deserialize_state)] CaseInfo, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] Array<Constr>),
+    Construct(#[serde(deserialize_state)] PUniverses<Cons>),
+    Ind(#[serde(deserialize_state)] PUniverses<Ind>),
+    Const(#[serde(deserialize_state)] PUniverses<Cst>),
+    App(#[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] Array<Constr>),
+    LetIn(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>),
+    Lambda(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>),
+    Prod(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>),
+    Cast(#[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] Cast, #[serde(deserialize_state)] ORef<Constr>),
+    Sort(#[serde(deserialize_state)] Sort),
     Evar(Fail),
     Meta(Fail),
     Var(Fail),
     Rel(Int),
 }
 
-#[derive(Deserialize, Debug)]
-pub struct PRec(Vec<Name>, Vec<Constr>, Vec<Constr>);
+#[derive(DeserializeState, Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct PRec(#[serde(deserialize_state)] Array<Name>, #[serde(deserialize_state)] Array<Constr>, #[serde(deserialize_state)] Array<Constr>);
 
-#[derive(Deserialize, Debug)]
-pub struct Fix2(Vec<Int>, Int);
+#[derive(DeserializeState, Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct Fix2(#[serde(deserialize_state)] Array<Int>, Int);
 
-#[derive(Deserialize, Debug)]
-pub struct Fix(Fix2, PRec);
+#[derive(DeserializeState, Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct Fix(#[serde(deserialize_state)] Fix2, #[serde(deserialize_state)] PRec);
 
-#[derive(Deserialize,Debug)]
-pub struct CoFix(Int, PRec);
+#[derive(DeserializeState,Debug)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct CoFix(Int, #[serde(deserialize_state)] PRec);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum RDecl {
-    LocalDef(Name, Constr, Constr),
-    LocalAssum(Name, Constr),
+    LocalDef(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] Constr, #[serde(deserialize_state)] Constr),
+    LocalAssum(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] Constr),
 }
 
 pub type Rctxt = List<RDecl>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(de_parameters = "S")]
+#[serde(deserialize_state = "S")]
 pub enum SectionCtxt {
     Nil,
 }
 
 /* kernel/mod_subst */
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum DeltaHint {
-    Equiv(Kn),
-    Inline(Int, Opt<Constr>),
+    Equiv(#[serde(deserialize_state)] Kn),
+    Inline(Int, #[serde(deserialize_state)] Opt<Constr>),
 }
 
-#[derive(Debug, Deserialize)]
-pub struct Resolver(Map<Mp, Mp>, HMap<Kn, DeltaHint>);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct Resolver(#[serde(deserialize_state)] Map<Mp, Mp>, #[serde(deserialize_state)] HMap<Kn, DeltaHint>);
 
-#[derive(Debug, Deserialize)]
-pub struct MpResolver(Mp, Resolver);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct MpResolver(#[serde(deserialize_state)] Mp, #[serde(deserialize_state)] Resolver);
 
-#[derive(Debug, Deserialize)]
-pub struct Subst(Map<Mp, MpResolver>, Map<UId, MpResolver>);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct Subst(#[serde(deserialize_state)] Map<Mp, MpResolver>, #[serde(deserialize_state)] Map<UId, MpResolver>);
 
 /* kernel/lazyconstr */
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub struct Substituted<T> {
-    value: T,
-    subst: List<Subst>,
+    #[serde(deserialize_state)] value: T,
+    #[serde(deserialize_state)] subst: List<Subst>,
 }
 
 pub type CstrSubst = Substituted<Constr>;
 
 // NB: Second constructor [Direct] isn't supposed to appear in a .vo
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum LazyConstr {
     // Direct(CstrSubst),
-    Indirect(List<Subst>, Dp, Int),
+    Indirect(#[serde(deserialize_state)] List<Subst>, #[serde(deserialize_state)] Dp, Int),
 }
 
 /* kernel/declarations */
 
 // static IMPREDICATIVE_SET : ValueS = ENUM!("impr-set", 2);
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Engagement {
     ImpredicativeSet,
     PredicativeSet,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct PolArity {
-    param_levels: List<Opt<Level>>,
-    level: Univ,
+    #[serde(deserialize_state)] param_levels: List<Opt<Level>>,
+    #[serde(deserialize_state)] level: Univ,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum CstType {
-    TemplateArity((Rctxt, PolArity)),
-    RegularArity(Constr),
+    TemplateArity(#[serde(deserialize_state)] (Rctxt, PolArity)),
+    RegularArity(#[serde(deserialize_state)] Constr),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum CstDef {
-    OpaqueDef(LazyConstr),
-    Def(CstrSubst),
+    OpaqueDef(#[serde(deserialize_state)] LazyConstr),
+    Def(#[serde(deserialize_state)] CstrSubst),
     Undef(Opt<Int>),
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ProjEta(Constr, Constr);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct ProjEta(#[serde(deserialize_state)] Constr, #[serde(deserialize_state)] Constr);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct ProjBody {
-    ind: Cst,
+    #[serde(deserialize_state)] ind: Cst,
     npars: Int,
     arg: Int,
-    ty: Constr,
-    eta: ProjEta,
-    body: Constr,
+    #[serde(deserialize_state)] ty: Constr,
+    #[serde(deserialize_state)] eta: ProjEta,
+    #[serde(deserialize_state)] body: Constr,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct TypingFlags {
     check_guarded: Bool,
     check_universes: Bool,
@@ -350,73 +413,81 @@ pub struct TypingFlags {
 
 // static CONST_UNIVS : ValueS = SUM!("constant_universes", 0, [CONTEXT], [ABS_CONTEXT]);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Cb {
-    hyps: SectionCtxt,
-    body: CstDef,
-    ty: CstType,
-    body_code: Any,
+    #[serde(deserialize_state)] hyps: SectionCtxt,
+    #[serde(deserialize_state)] body: CstDef,
+    #[serde(deserialize_state)] ty: CstType,
+    #[serde(deserialize_state)] body_code: Any,
     polymorphic: Bool,
-    universes: Context,
-    proj: Opt<ProjBody>,
+    #[serde(deserialize_state)] universes: Context,
+    #[serde(deserialize_state)] proj: Opt<ProjBody>,
     inline_code: Bool,
-    typing_flags: TypingFlags,
+    #[serde(deserialize_state)] typing_flags: TypingFlags,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum RecArg {
     Norec,
-    Imbr(Ind),
-    Mrec(Ind),
+    Imbr(#[serde(deserialize_state)] Ind),
+    Mrec(#[serde(deserialize_state)] Ind),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Wfp {
-    Rec(Int, Vec<Wfp>),
-    Node(RecArg, Vec<Wfp>),
+    Rec(Int, #[serde(deserialize_state)] Array<Wfp>),
+    Node(#[serde(deserialize_state)] RecArg, #[serde(deserialize_state)] Array<Wfp>),
     Param(Int, Int),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct MonoIndArity {
-    user_arity: Constr,
-    sort: Sort
+    #[serde(deserialize_state)] user_arity: Constr,
+    #[serde(deserialize_state)] sort: Sort,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum IndArity {
-    TemplateArity(PolArity),
-    RegularArity(MonoIndArity),
+    TemplateArity(#[serde(deserialize_state)] PolArity),
+    RegularArity(#[serde(deserialize_state)] MonoIndArity),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct OneInd {
-    typename: Id,
-    arity_ctxt: Rctxt,
-    arity: IndArity,
-    consnames: Vec<Id>,
-    user_lc: Vec<Constr>,
+    #[serde(deserialize_state)] typename: Id,
+    #[serde(deserialize_state)] arity_ctxt: Rctxt,
+    #[serde(deserialize_state)] arity: IndArity,
+    #[serde(deserialize_state)] consnames: Array<Id>,
+    #[serde(deserialize_state)] user_lc: Array<Constr>,
     nrealargs: Int,
     nrealdecls: Int,
-    kelim: List<SortFam>,
-    nf_lc: Vec<Constr>,
-    consnrealargs: Vec<Int>,
-    consnrealdecls: Vec<Int>,
-    recargs: Wfp,
+    #[serde(deserialize_state)] kelim: List<SortFam>,
+    #[serde(deserialize_state)] nf_lc: Array<Constr>,
+    #[serde(deserialize_state)] consnrealargs: Array<Int>,
+    #[serde(deserialize_state)] consnrealdecls: Array<Int>,
+    #[serde(deserialize_state)] recargs: Wfp,
     nb_constant: Int,
     nb_args: Int,
-    reloc_tbl: Any,
+    #[serde(deserialize_state)] reloc_tbl: Any,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Finite {
     Finite,
     CoFinite,
     BiFinite,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct RecordBody(Id, Vec<Cst>, Vec<ProjBody>);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct RecordBody(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] Array<Cst>, #[serde(deserialize_state)] Array<ProjBody>);
 
 pub type MindRecord = Opt<Opt<RecordBody>>;
 
@@ -426,133 +497,150 @@ pub type MindRecord = Opt<Opt<RecordBody>>;
     [ABS_CUM_INFO]
 ); */
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct IndPack {
-    packets: Vec<OneInd>,
-    record: MindRecord,
-    finite: Finite,
+    #[serde(deserialize_state)] packets: Array<OneInd>,
+    #[serde(deserialize_state)] record: MindRecord,
+    #[serde(deserialize_state)] finite: Finite,
     ntypes: Int,
-    hyps: SectionCtxt,
+    #[serde(deserialize_state)] hyps: SectionCtxt,
     nparams: Int,
     nparams_rec: Int,
-    params_ctxt: Rctxt,
+    #[serde(deserialize_state)] params_ctxt: Rctxt,
     polymorphic: Bool,
-    universes: Context,
+    #[serde(deserialize_state)] universes: Context,
     private: Opt<Bool>,
-    typing_flags: TypingFlags,
+    #[serde(deserialize_state)] typing_flags: TypingFlags,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct WithDef(Constr, Context);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct WithDef(#[serde(deserialize_state)] Constr, #[serde(deserialize_state)] Context);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum With {
-    Def(List<Id>, WithDef),
-    Mod(List<Id>, Mp),
+    Def(#[serde(deserialize_state)] List<Id>, #[serde(deserialize_state)] WithDef),
+    Mod(#[serde(deserialize_state)] List<Id>, #[serde(deserialize_state)] Mp),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Mae {
-    With(Box<Mae>, With),
-    Apply(Box<Mae>, Mp),
-    Ident(Mp),
+    With(#[serde(deserialize_state)] ORef<Mae>, #[serde(deserialize_state)] With),
+    Apply(#[serde(deserialize_state)] ORef<Mae>, #[serde(deserialize_state)] Mp),
+    Ident(#[serde(deserialize_state)] Mp),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Sfb {
-    ModType(ModType),
-    Module(Module),
-    Mind(IndPack),
-    Const(Cb),
+    ModType(#[serde(deserialize_state)] ModType),
+    Module(#[serde(deserialize_state)] Module),
+    Mind(#[serde(deserialize_state)] IndPack),
+    Const(#[serde(deserialize_state)] Cb),
 }
 
-#[derive(Debug, Deserialize)]
-pub struct StructureBody(Id, Box<Sfb>);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct StructureBody(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] ORef<Sfb>);
 
 pub type Struc = List<StructureBody>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Sign {
-    MoreFunctor(UId, Box<ModType>, Box<Sign>),
-    NoFunctor(Struc),
+    MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] ORef<ModType>, #[serde(deserialize_state)] ORef<Sign>),
+    NoFunctor(#[serde(deserialize_state)] Struc),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum MExpr {
-    MoreFunctor(UId, Box<ModType>, Box<MExpr>),
-    NoFunctor(Mae),
+    MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] ORef<ModType>, #[serde(deserialize_state)] ORef<MExpr>),
+    NoFunctor(#[serde(deserialize_state)] Mae),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum Impl {
     Abstract,
     FullStruct,
-    Struct(Sign),
-    Algebraic(MExpr),
+    Struct(#[serde(deserialize_state)] Sign),
+    Algebraic(#[serde(deserialize_state)] MExpr),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum NoImpl {
     Abstract,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Module {
-    mp: Mp,
-    expr: Impl,
-    ty: Sign,
-    type_alg: Opt<MExpr>,
-    constraints: ContextSet,
-    delta: Resolver,
-    retroknowledge: Any,
+    #[serde(deserialize_state)] mp: Mp,
+    #[serde(deserialize_state)] expr: Impl,
+    #[serde(deserialize_state)] ty: Sign,
+    #[serde(deserialize_state)] type_alg: Opt<MExpr>,
+    #[serde(deserialize_state)] constraints: ContextSet,
+    #[serde(deserialize_state)] delta: Resolver,
+    #[serde(deserialize_state)] retroknowledge: Any,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct ModType {
-    mp: Mp,
-    expr: NoImpl,
-    ty: Sign,
-    type_alg: Opt<MExpr>,
-    constraints: ContextSet,
-    delta: Resolver,
-    retroknowledge: Any,
+    #[serde(deserialize_state)] mp: Mp,
+    #[serde(deserialize_state)] expr: NoImpl,
+    #[serde(deserialize_state)] ty: Sign,
+    #[serde(deserialize_state)] type_alg: Opt<MExpr>,
+    #[serde(deserialize_state)] constraints: ContextSet,
+    #[serde(deserialize_state)] delta: Resolver,
+    #[serde(deserialize_state)] retroknowledge: Any,
 }
 
 /* kernel/safe_typing */
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub enum VoDigest {
-    Dviovo(Str, Str),
-    Dvo(Str),
+    Dviovo(#[serde(deserialize_state)] Str, #[serde(deserialize_state)] Str),
+    Dvo(#[serde(deserialize_state)] Str),
 }
 
-#[derive(Debug, Deserialize)]
-pub struct LibraryInfo(Dp, VoDigest);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct LibraryInfo(#[serde(deserialize_state)] Dp, #[serde(deserialize_state)] VoDigest);
 
-pub type Deps = Vec<LibraryInfo>;
+pub type Deps = Array<LibraryInfo>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct CompiledLib {
-    name: Dp,
-    module: Module,
-    deps: Deps,
-    enga: Engagement,
-    natsymbs: Any,
+    #[serde(deserialize_state)] name: Dp,
+    #[serde(deserialize_state)] module: Module,
+    #[serde(deserialize_state)] deps: Deps,
+    #[serde(deserialize_state)] enga: Engagement,
+    #[serde(deserialize_state)] natsymbs: Any,
 }
 
 /* Library objects */
 
 pub type Obj = Dyn;
 
-#[derive(Debug, Deserialize)]
-pub struct LibObj(Id, Obj);
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct LibObj(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] Obj);
 
 pub type LibObjs = List<LibObj>;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct LibraryObjs {
-    compiled: LibObjs,
-    objects: LibObjs,
+    #[serde(deserialize_state)] compiled: LibObjs,
+    #[serde(deserialize_state)] objects: LibObjs,
 }
 
 // STM objects
@@ -619,23 +707,26 @@ let v_stm_seg = v_pair v_tasks v_counters
 
 /* Toplevel structures in a vo (see Cic.mli) */
 
-#[derive(Debug,Deserialize)]
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct LibSum {
-    name: Dp,
-    imports: Vec<Dp>,
-    deps: Deps,
+    #[serde(deserialize_state)] name: Dp,
+    #[serde(deserialize_state)] imports: Array<Dp>,
+    #[serde(deserialize_state)] deps: Deps,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
 pub struct Lib {
-    compiled: CompiledLib,
-    objects: LibraryObjs,
+    #[serde(deserialize_state)] compiled: CompiledLib,
+    #[serde(deserialize_state)] objects: LibraryObjs,
 }
 
-pub type Opaques = Vec<Computation<Constr>>;
+pub type Opaques = Array<Computation<Constr>>;
 
-#[derive(Debug,Deserialize)]
-pub struct UnivTable(Vec<Computation<ContextSet>>, ContextSet, Bool);
+#[derive(Debug,DeserializeState)]
+#[serde(deserialize_state = "Seed<'de>")]
+pub struct UnivTable(#[serde(deserialize_state)] Array<Computation<ContextSet>>, #[serde(deserialize_state)] ContextSet, Bool);
 
 pub type UnivOpaques = Opt<UnivTable>;
 

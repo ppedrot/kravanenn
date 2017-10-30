@@ -1,4 +1,5 @@
 extern crate kravanenn;
+extern crate serde;
 
 use std::fs::File;
 use std::io;
@@ -66,18 +67,24 @@ fn main () {
         ocaml::marshal::read_segment(&mut file).unwrap();
    }
    let (_, ref obj) = try_fatal!(ocaml::marshal::read_segment(&mut file));
-   let sd : Result<LibSum, _> = ocaml::de::from_obj(obj);
-   let md : Result<Lib, _> = ocaml::de::from_obj(obj);
-   let opaque_csts : Result<UnivOpaques, _> = ocaml::de::from_obj(obj);
-   let discharging : Result<Option<Any>, _> = ocaml::de::from_obj(obj);
-   let tasks : Result<Option<Any>, _> = ocaml::de::from_obj(obj);
-   let table : Result<Opaques, _> = ocaml::de::from_obj(obj);
-   println!("sd: {:?}, {:?}", sd.is_ok(), format!("{:?}", sd).len());
-   println!("md: {:?}, {:?}", md.is_ok(), format!("{:?}", md).len());
-   println!("opaque_csts: {:?}, {:?}", opaque_csts.is_ok(), format!("{:?}", opaque_csts).len());
+   let mut seed = ocaml::de::Seed::new(&obj.memory);
+   let sd : Result<LibSum, _> = ocaml::de::from_obj_state(obj, &mut seed);
+   let mut seed = ocaml::de::Seed::new(&obj.memory);
+   let md : Result<Lib, _> = ocaml::de::from_obj_state(obj, &mut seed);
+   let mut seed = ocaml::de::Seed::new(&obj.memory);
+   let opaque_csts : Result<UnivOpaques, _> = ocaml::de::from_obj_state(obj, &mut seed);
+   let mut seed = ocaml::de::Seed::new(&obj.memory);
+   let discharging : Result<Option<Any>, _> = ocaml::de::from_obj_state(obj, &mut seed);
+   let mut seed = ocaml::de::Seed::new(&obj.memory);
+   let tasks : Result<Option<Any>, _> = ocaml::de::from_obj_state(obj, &mut seed);
+   let mut seed = ocaml::de::Seed::new(&obj.memory);
+   let table : Result<Opaques, _> = ocaml::de::from_obj_state(obj, &mut seed);
+   println!("sd: {:?}", sd.is_ok()/*, format!("{:?}", sd).len()*/);
+   println!("md: {:?}", md.is_ok()/*, format!("{:?}", md).len()*/);
+   println!("opaque_csts: {:?}", opaque_csts.is_ok()/*, format!("{:?}", opaque_csts).len()*/);
    println!("discharging: {:?}", if let Ok(None) = discharging { true } else { false });
    println!("tasks: {:?}", if let Ok(None) = tasks { true } else { false });
-   println!("table: {:?}, {:?}", table.is_ok(), format!("{:?}", table).len());
+   println!("table: {:?}", table.is_ok()/*, format!("{:?}", table).len()*/);
    let ocaml::marshal::Memory(ref mem) = obj.memory;
-   ocaml::votour::visit_object(&obj.entry, mem);
+   ocaml::votour::visit_object(obj.entry, mem);
 }

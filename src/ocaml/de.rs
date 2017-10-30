@@ -2,9 +2,21 @@ use ocaml::marshal::{Obj, Field, RawString, ObjRepr};
 use ocaml::votour::{Closure};
 use std::error::{self, Error as StdError};
 use std::fmt;
+use std::rc::Rc;
 
 use serde;
+use vec_map::{VecMap};
+use std::any::Any;
 use serde::de::{Error as DeError, IntoDeserializer};
+
+#[derive(Debug)]
+pub struct ORef<T>(pub Rc<T>);
+
+#[derive(Debug)]
+pub struct Array<T>(pub Rc<Vec<T>>);
+
+#[derive(Debug)]
+pub struct Str(pub Rc<Vec<u8>>);
 
 #[derive(Debug)]
 pub enum Error<'a> {
@@ -119,14 +131,14 @@ pub type Deserializer<'a> = Closure<'a>;
 
 impl<'a> Deserializer<'a> {
     fn obj(self) -> Result<&'a Obj, Error<'a>> {
-        match *self.0 {
+        match self.0 {
             Field::Ref(p) => self.1.get(p).ok_or(Error::InvalidObjEncoding(self)),
             _ => Err(Error::InvalidObjEncoding(self))
         }
     }
 
     fn block(self) -> Result<(u8, &'a [Field]), Error<'a>> {
-        match *self.0 {
+        match self.0 {
             Field::Ref(_) => self.obj()?.block(),
             Field::Atm(tag) => {
                 const EMPTY_FIELDS : &'static [Field] = &[];
@@ -160,7 +172,7 @@ macro_rules! impl_nums {
         fn $dser_method<V>(self, visitor: V) -> Result<V::Value, Error<'a>>
             where V: serde::de::Visitor<'de>,
         {
-            match *self.0 {
+            match self.0 {
                 Field::Int (i) => visitor.$visitor_method(i as $ty),
                 _ => Err(Error::InvalidIntEncoding(self))
             }
@@ -183,7 +195,7 @@ impl<'de, 'a, I> serde::de::SeqAccess<'de> for Access<'a, I>
     {
         /* println!("remaining: {:?}", self.iter.size_hint())*/;
         match self.iter.next() {
-            Some(field) => serde::de::DeserializeSeed::deserialize(seed, Closure(field, self.memory)).map(Some),
+            Some(&field) => serde::de::DeserializeSeed::deserialize(seed, Closure(field, self.memory)).map(Some),
             None => {
                 /* println!("Done!")*/;
                 Ok(None)
@@ -285,7 +297,7 @@ impl<'de, 'a> serde::Deserializer<'de> for Deserializer<'a>
                 let mut iter = block.iter();
                 let field = iter.next().ok_or(Error::LengthMismatch(block, 1))?;
                 match iter.next() {
-                    None => serde::de::DeserializeSeed::deserialize(seed, Closure(field, self.de.1)),
+                    None => serde::de::DeserializeSeed::deserialize(seed, Closure(*field, self.de.1)),
                     _ => Err(Error::LengthMismatch(block, 1)),
                 }
             }
@@ -309,7 +321,7 @@ impl<'de, 'a> serde::Deserializer<'de> for Deserializer<'a>
             }
         }
 
-        let res = match *self.0 {
+        let res = match self.0 {
             Field::Int(n) => {
                 // This is a unit variant, which means it goes first.
                 // FIXME: Assert that n is actually a u32 before downcasting.
@@ -352,14 +364,14 @@ impl<'de, 'a> serde::Deserializer<'de> for Deserializer<'a>
     where
         V: serde::de::Visitor<'de>,
     {
-        let res = match *self.0 {
+        let res = match self.0 {
             Field::Int(0) => visitor.visit_none(),
             Field::Ref(_) => match self.obj()?.block()? {
                 (0, block) => {
                     let mut iter = block.iter();
                     let field = iter.next().ok_or(Error::LengthMismatch(block, 1))?;
                     match iter.next() {
-                        None => visitor.visit_some(Closure(field, self.1)),
+                        None => visitor.visit_some(Closure(*field, self.1)),
                         _ => Err(Error::LengthMismatch(block, 1)),
                     }
                 },
@@ -397,12 +409,17 @@ impl<'de, 'a> serde::Deserializer<'de> for Deserializer<'a>
         res
     }
 
-    fn deserialize_identifier<V>(self, _visitor: V) -> Result<V::Value, Error<'a>>
+    fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Error<'a>>
     where
         V: serde::de::Visitor<'de>,
     {
         let message = "OCaml does not support Deserializer::deserialize_identifier";
-        Err(Error::custom(message))
+        match self.0 {
+            Field::Ref(p) => visitor.visit_i64(p as i64),
+            Field::Atm(tag) => visitor.visit_i64(-(tag as i64) - 1),
+            Field::Int(i) => visitor.visit_i64(-i - 257), // FIXME: checked arithmetic
+            _ => Err(Error::custom(message)),
+        }
     }
 
     fn deserialize_newtype_struct<V>(self, _name: &str, visitor: V) -> Result<V::Value, Error<'a>>
@@ -451,14 +468,120 @@ impl<'de, 'a> serde::Deserializer<'de> for Deserializer<'a>
     }
 }
 
-impl<'de> serde::de::Deserialize<'de> for RawString {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-        where D: serde::de::Deserializer<'de>
+struct IdentVisitor;
+
+impl<'de> serde::de::Visitor<'de> for IdentVisitor {
+    type Value = isize;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str("OCaml String")
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where E: serde::de::Error
     {
+        Ok(v as isize)
+    }
+}
+
+pub struct Seed<'s> {
+    /// A mapping from object pointers (block numbers) to dynamically typed values.  It is an error
+    /// for two references to the same block to have different types, so once a value is set in the
+    /// VecMap it should not change, and we also know its length up front; however, neither
+    /// property seems to make it worth using something other than a VecMap.
+    rust_memory: VecMap<Rc<Any>>,
+    /// OCaml's memory, represented as an array of blocks.  Should have the same length as the
+    /// VecMap.
+    ocaml_memory: &'s [Obj],
+}
+
+impl<'s> Seed<'s> {
+    pub fn new(ocaml_memory: &'s [Obj]) -> Self {
+        Seed {
+            rust_memory: VecMap::with_capacity(ocaml_memory.len()),
+            ocaml_memory: ocaml_memory,
+        }
+    }
+}
+
+impl<'de, 's, T> serde::de::DeserializeState<'de, Seed<'s>> for ORef<T>
+    where T: 'static,
+          T: serde::de::DeserializeState<'de, Seed<'s>>,
+{
+    fn deserialize_state<'seed, D>(seed: &'seed mut Seed<'s>, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        let p = deserializer.deserialize_identifier(IdentVisitor)?;
+        // Okay: we have the ptr, atm, or tag number... (fixme: make this work properly).
+        if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
+            // Occupied entries have been visited before, so we just need to confirm that we have
+            // the same time now that we did last time.
+            return match o.downcast::<T>() {
+                Ok(a) => {
+                    seed.rust_memory.insert(p as usize, a.clone());
+                    Ok(ORef(a))
+                },
+                Err(_) => {
+                    /* println!("Error with typeid {:?}", ::std::any::TypeId::of::<T>());
+                    println!("{:?}", seed.rust_memory); */
+                    Err(D::Error::custom(Error::Custom("Type mismatch".into())))
+                },
+            }
+        }
+        // Vacant entries have not yet been visited, so we need to visit this one and allocate
+        // an entry.
+        let deserializer = Closure(if p >= 0 { Field::Ref(p as usize) }
+                                   else if p >= -256 { Field::Atm(-(p + 1) as u8) }
+                                   else { Field::Int(-(p + 257) as i64) }, seed.ocaml_memory);
+        // Note that if we had a cycle, this strategy will not necessarily terminate...
+        // cycle detection would require keeping some sort of placeholder in the entry (of
+        // the wrong type) to make sure we panicked if we came to it a second time.
+        let res: T = serde::de::DeserializeState::deserialize_state(&mut *seed, deserializer).map_err(D::Error::custom)?;
+        let res: Rc<T> = Rc::from(res);
+        let res_: Rc<T> = res.clone();
+        let res = if p >= 0 && seed.rust_memory.insert(p as usize, res_).is_some() {
+            Err(D::Error::custom::<String>("The memory location was somehow mapped to a type before we finished deserializing its contents".into()))
+        } else {
+            /* println!("ORef {:?} TypeId {:?}", p, ::std::any::TypeId::of::<T>()); */
+            Ok(ORef(res))
+        };
+        // if res.is_ok() { /* println!("Done deserializing seq: {}", self)*/ };
+        res
+    }
+}
+
+impl<'de, 's> serde::de::DeserializeState<'de, Seed<'s>> for Str
+{
+    fn deserialize_state<'seed, D>(seed: &'seed mut Seed<'s>, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        /* println!("SRef"); */
+        let p = deserializer.deserialize_identifier(IdentVisitor)?;
+        /* println!("SRef {:?}", p); */
+        // Okay: we have the ptr, atm, or tag number... (fixme: make this work properly).
+        if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
+            // Occupied entries have been visited before, so we just need to confirm that we have
+            // the same time now that we did last time.
+            return match o.downcast::<Vec<u8>>() {
+                Ok(a) => {
+                    seed.rust_memory.insert(p as usize, a.clone());
+                    Ok(Str(a))
+                },
+                Err(_) => {
+                    /* println!("Error with typeid {:?}", ::std::any::TypeId::of::<Vec<u8>>()); */
+                    /* println!("{:?}", seed.rust_memory); */
+                    Err(D::Error::custom(Error::Custom("Type mismatch".into())))
+                },
+            }
+        }
+        // Vacant entries have not yet been visited, so we need to visit this one and allocate
+        // an entry.
         struct RawStringVisitor;
 
         impl<'de> serde::de::Visitor<'de> for RawStringVisitor {
-            type Value = RawString;
+            type Value = Vec<u8>;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("OCaml String")
@@ -467,19 +590,91 @@ impl<'de> serde::de::Deserialize<'de> for RawString {
             fn visit_bytes<E>(self, v: &[u8]) -> Result<Self::Value, E>
                 where E: serde::de::Error
             {
-                Ok(RawString(v.to_vec().into_boxed_slice()))
+                Ok(v.to_vec())
             }
         }
 
-        deserializer.deserialize_bytes(RawStringVisitor)
+        let deserializer = Closure(if p >= 0 { Field::Ref(p as usize) }
+                                   else if p >= -256 { Field::Atm(-(p + 1) as u8) }
+                                   else { Field::Int(-(p + 257) as i64) }, seed.ocaml_memory);
+        // Note that if we had a cycle, this strategy will not necessarily terminate...
+        // cycle detection would require keeping some sort of placeholder in the entry (of
+        // the wrong type) to make sure we panicked if we came to it a second time.
+        let res: Vec<u8> = serde::de::Deserializer::deserialize_bytes(deserializer, RawStringVisitor).map_err(D::Error::custom)?;
+        let res: Rc<Vec<u8>> = Rc::from(res);
+        let res_ = res.clone();
+        let res = if p >= 0 && seed.rust_memory.insert(p as usize, res_).is_some() {
+            Err(D::Error::custom::<String>("The memory location was somehow mapped to a type before we finished deserializing its contents".into()))
+        } else {
+            /* println!("SRef {:?} TypeId {:?}", p, ::std::any::TypeId::of::<Vec<u8>>()); */
+            Ok(Str(res))
+        };
+        // if res.is_ok() { /* println!("Done deserializing seq: {}", self)*/ };
+        res
     }
 }
 
-
-pub fn from_obj<'a, T>(obj: &'a ObjRepr) -> Result<T, Error<'a>>
-    where T: serde::de::Deserialize<'a>
+impl<'s, 'de, T> serde::de::DeserializeState<'de, Seed<'s>> for Array<T>
+    where T: 'static,
+          T: serde::de::DeserializeState<'de, Seed<'s>>,
+          // Seed<'s>: serde::de::DeserializeSeed<'de>,
 {
-    let ObjRepr { ref entry, ref memory} = *obj;
+    fn deserialize_state<'seed, D>(seed: &'seed mut Seed<'s>, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        /* println!("ARef"); */
+        let p = deserializer.deserialize_identifier(IdentVisitor)?;
+        /* println!("ARef {:?}", p); */
+        // Okay: we have the ptr, atm, or tag number... (fixme: make this work properly).
+        if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
+            // Occupied entries have been visited before, so we just need to confirm that we have
+            // the same time now that we did last time.
+            return match o.downcast::<Vec<T>>() {
+                Ok(a) => {
+                    seed.rust_memory.insert(p as usize, a.clone());
+                    Ok(Array(a))
+                },
+                Err(_) => {
+                    /* println!("Error with typeid {:?}", ::std::any::TypeId::of::<T>());
+                    println!("{:?}", seed.rust_memory); */
+                    Err(D::Error::custom(Error::Custom("Type mismatch".into())))
+                },
+            }
+        }
+        // Vacant entries have not yet been visited, so we need to visit this one and allocate
+        // an entry.
+        let deserializer = Closure(if p >= 0 { Field::Ref(p as usize) }
+                                   else if p >= -256 { Field::Atm(-(p + 1) as u8) }
+                                   else { Field::Int(-(p + 257) as i64) }, seed.ocaml_memory);
+        // Note that if we had a cycle, this strategy will not necessarily terminate...
+        // cycle detection would require keeping some sort of placeholder in the entry (of
+        // the wrong type) to make sure we panicked if we came to it a second time.
+        let res: Vec<T> = serde::de::DeserializeState::deserialize_state(&mut *seed, deserializer).map_err(D::Error::custom)?;
+        let res: Rc<Vec<T>> = Rc::from(res);
+        let res_ = res.clone();
+        // Insert the vector slice with the deserialized sequence, suitably cast, into the vacant entry.
+        // Note that if we had a cycle, this strategy will not necessarily terminate...
+        // cycle detection would require keeping some sort of placeholder in the entry (of
+        // the wrong type) to make sure we panicked if we came to it a second time.
+        // We unwrap() here because it shouldn't be possible for this memory slot to have
+        // been filled by someone else yet (since they would've had to iterate through the
+        // same sequence of elements).
+        let res = if p >= 0 && seed.rust_memory.insert(p as usize, res_).is_some() {
+            Err(D::Error::custom::<String>("The memory location was somehow mapped to a type before we finished deserializing its contents".into()))
+        } else {
+            /* println!("ARef {:?} TypeId {:?}", p, ::std::any::TypeId::of::<T>()); */
+            Ok(Array(res))
+        };
+        // if res.is_ok() { /* println!("Done deserializing seq: {}", self)*/ };
+        res
+    }
+}
+
+pub fn from_obj_state<'a, 'de, 'seed, S, T>(obj: &'a ObjRepr, seed: &'seed mut S) -> Result<T, Error<'a>>
+    where T: serde::de::DeserializeState<'de, S>, T: 'static,
+{
+    let ObjRepr { entry, ref memory} = *obj;
     let deserializer = Closure(entry, &*memory);
-    T::deserialize(deserializer)
+    T::deserialize_state(seed, deserializer)
 }
