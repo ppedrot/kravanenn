@@ -8,7 +8,7 @@ pub type Fail = u8;
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum List<T> where T: 'static {
     Nil,
-    Cons(#[serde(deserialize_state)] T, #[serde(deserialize_state)] ORef<List<T>>),
+    Cons(#[serde(deserialize_state)] ORef<(T, List<T>)>),
 }
 
 pub type Opt<T> = Option<T>;
@@ -38,7 +38,7 @@ pub struct Dyn;
 #[serde(bound(deserialize = "V: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum Set<V> where V: 'static {
     Nil,
-    Node(#[serde(deserialize_state)] ORef<Set<V>>, #[serde(deserialize_state)] V, #[serde(deserialize_state)] ORef<Set<V>>, Int),
+    Node(#[serde(deserialize_state)] ORef<(Set<V>, V, Set<V>, Int)>),
 }
 
 #[derive(DeserializeState,Debug)]
@@ -46,7 +46,7 @@ pub enum Set<V> where V: 'static {
 #[serde(bound(deserialize = "K: serde::de::DeserializeState<'de, Seed<'de>>, V: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum Map<K, V> where K: 'static, V: 'static {
     Nil,
-    Node(#[serde(deserialize_state)] ORef<Map<K, V>>,  #[serde(deserialize_state)] K,  #[serde(deserialize_state)] V, #[serde(deserialize_state)] ORef<Map<K, V>>, Int),
+    Node(#[serde(deserialize_state)] ORef<(Map<K, V>, K, V, Map<K, V>, Int)>),
 }
 
 pub type HSet<V> = Map<Int, Set<V>>;
@@ -56,7 +56,7 @@ pub type HSet<V> = Map<Int, Set<V>>;
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum HList<T> where T: 'static {
     Nil,
-    Cons(#[serde(deserialize_state)] T, Int, #[serde(deserialize_state)] ORef<HList<T>>),
+    Cons(#[serde(deserialize_state)] ORef<(T, Int, HList<T>)>),
 }
 
 pub type HMap<K, V> = Map<Int, Map<K, V>>;
@@ -114,7 +114,7 @@ pub struct Kn {
 #[derive(Debug, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Cst {
-    Dual(#[serde(deserialize_state)] Kn, #[serde(deserialize_state)] Kn), // user then canonical
+    Dual(#[serde(deserialize_state)] ORef<(Kn, Kn)>), // user then canonical
     Same(#[serde(deserialize_state)] Kn), // user = canonical
 }
 
@@ -146,7 +146,7 @@ pub enum RawLevel {
     Prop,
     Set,
     Var(Int),
-    Level(Int, #[serde(deserialize_state)] Dp),
+    Level(Int, #[serde(deserialize_state)] ORef<Dp>),
 }
 
 #[derive(Debug,DeserializeState)]
@@ -202,7 +202,7 @@ pub enum SortContents {
 #[derive(Debug,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Sort {
-    Type(#[serde(deserialize_state)] Univ),
+    Type(#[serde(deserialize_state)] ORef<Univ>),
     Prop(#[serde(deserialize_state)] SortContents),
 }
 
@@ -265,19 +265,19 @@ pub struct Proj(#[serde(deserialize_state)] Cst, Bool);
 #[derive(DeserializeState,Debug)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Constr {
-    Proj(#[serde(deserialize_state)] Proj, #[serde(deserialize_state)] ORef<Constr>),
-    CoFix(#[serde(deserialize_state)] CoFix),
-    Fix(#[serde(deserialize_state)] Fix),
-    Case(#[serde(deserialize_state)] CaseInfo, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] Array<Constr>),
-    Construct(#[serde(deserialize_state)] PUniverses<Cons>),
-    Ind(#[serde(deserialize_state)] PUniverses<Ind>),
-    Const(#[serde(deserialize_state)] PUniverses<Cst>),
-    App(#[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] Array<Constr>),
-    LetIn(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>),
-    Lambda(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>),
-    Prod(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] ORef<Constr>),
-    Cast(#[serde(deserialize_state)] ORef<Constr>, #[serde(deserialize_state)] Cast, #[serde(deserialize_state)] ORef<Constr>),
-    Sort(#[serde(deserialize_state)] Sort),
+    Proj(#[serde(deserialize_state)] ORef<(Proj, Constr)>),
+    CoFix(#[serde(deserialize_state)] ORef<CoFix>),
+    Fix(#[serde(deserialize_state)] ORef<Fix>),
+    Case(#[serde(deserialize_state)] ORef<(CaseInfo, Constr, Constr, Array<Constr>)>),
+    Construct(#[serde(deserialize_state)] ORef<PUniverses<Cons>>),
+    Ind(#[serde(deserialize_state)] ORef<PUniverses<Ind>>),
+    Const(#[serde(deserialize_state)] ORef<PUniverses<Cst>>),
+    App(#[serde(deserialize_state)] ORef<(Constr, Array<Constr>)>),
+    LetIn(#[serde(deserialize_state)] ORef<(Name, Constr, Constr, Constr)>),
+    Lambda(#[serde(deserialize_state)] ORef<(Name, Constr, Constr)>),
+    Prod(#[serde(deserialize_state)] ORef<(Name, Constr, Constr)>),
+    Cast(#[serde(deserialize_state)] ORef<(Constr, Cast, Constr)>),
+    Sort(#[serde(deserialize_state)] ORef<Sort>),
     Evar(Fail),
     Meta(Fail),
     Var(Fail),
@@ -303,7 +303,7 @@ pub struct CoFix(Int, #[serde(deserialize_state)] PRec);
 #[derive(Debug, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum RDecl {
-    LocalDef(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] Constr, #[serde(deserialize_state)] Constr),
+    LocalDef(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] Constr, #[serde(deserialize_state)] ORef<Constr>),
     LocalAssum(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] Constr),
 }
 
@@ -322,7 +322,7 @@ pub enum SectionCtxt {
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum DeltaHint {
     Equiv(#[serde(deserialize_state)] Kn),
-    Inline(Int, #[serde(deserialize_state)] Opt<Constr>),
+    Inline(Int, #[serde(deserialize_state)] ORef<Opt<Constr>>),
 }
 
 #[derive(Debug, DeserializeState)]
@@ -377,15 +377,15 @@ pub struct PolArity {
 #[derive(Debug, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum CstType {
-    TemplateArity(#[serde(deserialize_state)] (Rctxt, PolArity)),
+    TemplateArity(#[serde(deserialize_state)] ORef<(Rctxt, PolArity)>),
     RegularArity(#[serde(deserialize_state)] Constr),
 }
 
 #[derive(Debug, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum CstDef {
-    OpaqueDef(#[serde(deserialize_state)] LazyConstr),
-    Def(#[serde(deserialize_state)] CstrSubst),
+    OpaqueDef(#[serde(deserialize_state)] ORef<LazyConstr>),
+    Def(#[serde(deserialize_state)] ORef<CstrSubst>),
     Undef(Opt<Int>),
 }
 
@@ -431,8 +431,8 @@ pub struct Cb {
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum RecArg {
     Norec,
-    Imbr(#[serde(deserialize_state)] Ind),
-    Mrec(#[serde(deserialize_state)] Ind),
+    Imbr(#[serde(deserialize_state)] ORef<Ind>),
+    Mrec(#[serde(deserialize_state)] ORef<Ind>),
 }
 
 #[derive(Debug, DeserializeState)]
