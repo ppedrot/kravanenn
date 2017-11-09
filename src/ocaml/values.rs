@@ -1,9 +1,9 @@
 use ocaml::de::{Array, ORef, Str, Seed};
 use serde;
 
-pub type Fail = u8;
+pub type Fail = !;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum List<T> where T: 'static {
@@ -19,21 +19,21 @@ pub type Bool = bool;
 
 pub type Int = i64;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(de_parameters = "S")]
 #[serde(deserialize_state = "S")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, S>"))]
 pub struct Ref<T>(#[serde(deserialize_state)] T);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Any;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Dyn;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "V: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum Set<V> where V: 'static {
@@ -41,7 +41,7 @@ pub enum Set<V> where V: 'static {
     Node(#[serde(deserialize_state)] ORef<(Set<V>, V, Set<V>, Int)>),
 }
 
-#[derive(DeserializeState,Debug)]
+#[derive(DeserializeState,Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "K: serde::de::DeserializeState<'de, Seed<'de>>, V: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum Map<K, V> where K: 'static, V: 'static {
@@ -51,7 +51,7 @@ pub enum Map<K, V> where K: 'static, V: 'static {
 
 pub type HSet<V> = Map<Int, Set<V>>;
 
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum HList<T> where T: 'static {
@@ -63,13 +63,15 @@ pub type HMap<K, V> = Map<Int, Map<K, V>>;
 
 /* lib/future */
 
-#[derive(DeserializeState,Debug)]
+#[allow(unreachable_code)] // Allowed because of Fail
+#[allow(unreachable_patterns)] // Allowed because of Fail
+#[derive(DeserializeState,Debug,Clone)]
 #[serde(de_parameters = "S")]
 #[serde(deserialize_state = "S")]
-#[serde(bound(deserialize = "F: serde::de::DeserializeState<'de, S>"))]
+#[serde(bound(deserialize = "F: serde::de::DeserializeState<'de, S>, !: serde::de::DeserializeState<'de, S>"))]
 pub enum FutureComput<F> {
     Done(#[serde(deserialize_state)] F),
-    Ongoing(Fail),
+    Ongoing(#[serde(deserialize_state)] Fail),
 }
 
 pub type Computation<F> = Ref<FutureComput<F>>;
@@ -80,7 +82,7 @@ pub type Id = Str;
 
 pub type Dp = List<Id>;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(de_parameters = "S")]
 #[serde(deserialize_state = "S")]
 #[serde(bound(deserialize = "Str: serde::de::DeserializeState<'de, S>"))]
@@ -89,11 +91,11 @@ pub enum Name {
     Name(#[serde(deserialize_state)] Id), // non-anonymous identifier
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct UId(Int, #[serde(deserialize_state)] Str, #[serde(deserialize_state)] Dp);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Mp {
     Dot(#[serde(deserialize_state)] ORef<Mp>, #[serde(deserialize_state)] Id),
@@ -101,7 +103,7 @@ pub enum Mp {
     File(#[serde(deserialize_state)] Dp),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Kn {
     #[serde(deserialize_state)] canary: Any,
@@ -111,14 +113,14 @@ pub struct Kn {
     refhash: Int,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Cst {
     Dual(#[serde(deserialize_state)] ORef<(Kn, Kn)>), // user then canonical
     Same(#[serde(deserialize_state)] Kn), // user = canonical
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Ind {
     /// the name of the inductive type
@@ -129,7 +131,7 @@ pub struct Ind {
 }
 
 /// Designation of a (particular) constructor of a (particular) inductive type.
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Cons {
     /// designates the inductive type
@@ -140,7 +142,7 @@ pub struct Cons {
 
 /* kernel/univ */
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum RawLevel {
     Prop,
@@ -149,20 +151,20 @@ pub enum RawLevel {
     Level(Int, #[serde(deserialize_state)] ORef<Dp>),
 }
 
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Level {
     hash: Int,
     #[serde(deserialize_state)] data: RawLevel,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Expr(#[serde(deserialize_state)] Level, Int);
 
 pub type Univ = HList<Expr>;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 enum ConstraintType {
     Lt,
@@ -170,7 +172,7 @@ enum ConstraintType {
     Eq,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct UnivConstraint(#[serde(deserialize_state)] Level, #[serde(deserialize_state)] ConstraintType, #[serde(deserialize_state)] Level);
 
@@ -178,7 +180,7 @@ pub type Cstrs = Set<UnivConstraint>;
 
 pub type Instance = Array<Level>;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Context(#[serde(deserialize_state)] Instance, #[serde(deserialize_state)] Cstrs);
 
@@ -187,26 +189,26 @@ pub type AbsContext = Context;
 // static ABS_CUM_INFO : ValueS = TUPLE!("cumulativity_info", ABS_CONTEXT, CONTEXT);
 
 pub type LevelSet = HSet<Level>;
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct ContextSet(#[serde(deserialize_state)] LevelSet, #[serde(deserialize_state)] Cstrs);
 
 /* kernel/term */
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum SortContents {
     Pos,
     Null,
 }
 
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Sort {
     Type(#[serde(deserialize_state)] ORef<Univ>),
     Prop(#[serde(deserialize_state)] SortContents),
 }
 
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum SortFam {
     InProp,
@@ -214,14 +216,14 @@ pub enum SortFam {
     InType,
 }
 
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub struct PUniverses<T>(#[serde(deserialize_state)] T, #[serde(deserialize_state)] Instance);
 
 pub type BoolList = List<Bool>;
 
-#[derive(DeserializeState, Debug)]
+#[derive(DeserializeState, Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum CStyle {
     Let,
@@ -231,7 +233,7 @@ pub enum CStyle {
     Regular, // infer printing form from number of constructor
 }
 
-#[derive(DeserializeState, Debug)]
+#[derive(DeserializeState, Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct CPrint {
     #[serde(deserialize_state)] ind_tags: BoolList,
@@ -239,7 +241,7 @@ pub struct CPrint {
     #[serde(deserialize_state)] style: CStyle,
 }
 
-#[derive(DeserializeState, Debug)]
+#[derive(DeserializeState, Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct CaseInfo {
     #[serde(deserialize_state)] ind: Ind,
@@ -249,7 +251,7 @@ pub struct CaseInfo {
     #[serde(deserialize_state)] cstr_pp_info: CPrint, // not interpreted by the kernel
 }
 
-#[derive(DeserializeState,Debug)]
+#[derive(DeserializeState,Debug,Clone,Copy)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Cast {
     VMCast,
@@ -258,11 +260,13 @@ pub enum Cast {
     RevertCast, // FIXME: Figure out why this is apparently appearing in the file?
 }
 
-#[derive(DeserializeState,Debug)]
+#[derive(DeserializeState,Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Proj(#[serde(deserialize_state)] Cst, Bool);
 
-#[derive(DeserializeState,Debug)]
+#[allow(unreachable_code)] // Allowed because of Fail
+#[allow(unreachable_patterns)] // Allowed because of Fail
+#[derive(DeserializeState,Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Constr {
     Proj(#[serde(deserialize_state)] ORef<(Proj, Constr)>),
@@ -278,29 +282,29 @@ pub enum Constr {
     Prod(#[serde(deserialize_state)] ORef<(Name, Constr, Constr)>),
     Cast(#[serde(deserialize_state)] ORef<(Constr, Cast, Constr)>),
     Sort(#[serde(deserialize_state)] ORef<Sort>),
-    Evar(Fail),
-    Meta(Fail),
-    Var(Fail),
+    Evar(#[serde(deserialize_state)] Fail),
+    Meta(#[serde(deserialize_state)] Fail),
+    Var(#[serde(deserialize_state)] Fail),
     Rel(Int),
 }
 
-#[derive(DeserializeState, Debug)]
+#[derive(DeserializeState, Debug, Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct PRec(#[serde(deserialize_state)] Array<Name>, #[serde(deserialize_state)] Array<Constr>, #[serde(deserialize_state)] Array<Constr>);
+pub struct PRec(#[serde(deserialize_state)] pub Array<Name>, #[serde(deserialize_state)] pub Array<Constr>, #[serde(deserialize_state)] pub Array<Constr>);
 
-#[derive(DeserializeState, Debug)]
+#[derive(DeserializeState, Debug, Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Fix2(#[serde(deserialize_state)] Array<Int>, Int);
 
-#[derive(DeserializeState, Debug)]
+#[derive(DeserializeState, Debug, Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct Fix(#[serde(deserialize_state)] Fix2, #[serde(deserialize_state)] PRec);
+pub struct Fix(#[serde(deserialize_state)] pub Fix2, #[serde(deserialize_state)] pub PRec);
 
-#[derive(DeserializeState,Debug)]
+#[derive(DeserializeState,Debug, Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct CoFix(Int, #[serde(deserialize_state)] PRec);
+pub struct CoFix(pub Int, #[serde(deserialize_state)] pub PRec);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum RDecl {
     LocalDef(#[serde(deserialize_state)] Name, #[serde(deserialize_state)] Constr, #[serde(deserialize_state)] ORef<Constr>),
@@ -309,7 +313,7 @@ pub enum RDecl {
 
 pub type Rctxt = List<RDecl>;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(de_parameters = "S")]
 #[serde(deserialize_state = "S")]
 pub enum SectionCtxt {
@@ -318,28 +322,28 @@ pub enum SectionCtxt {
 
 /* kernel/mod_subst */
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum DeltaHint {
     Equiv(#[serde(deserialize_state)] Kn),
     Inline(Int, #[serde(deserialize_state)] ORef<Opt<Constr>>),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Resolver(#[serde(deserialize_state)] Map<Mp, Mp>, #[serde(deserialize_state)] HMap<Kn, DeltaHint>);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct MpResolver(#[serde(deserialize_state)] Mp, #[serde(deserialize_state)] Resolver);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Subst(#[serde(deserialize_state)] Map<Mp, MpResolver>, #[serde(deserialize_state)] Map<UId, MpResolver>);
 
 /* kernel/lazyconstr */
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub struct Substituted<T> {
@@ -350,7 +354,7 @@ pub struct Substituted<T> {
 pub type CstrSubst = Substituted<Constr>;
 
 // NB: Second constructor [Direct] isn't supposed to appear in a .vo
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum LazyConstr {
     // Direct(CstrSubst),
@@ -360,28 +364,28 @@ pub enum LazyConstr {
 /* kernel/declarations */
 
 // static IMPREDICATIVE_SET : ValueS = ENUM!("impr-set", 2);
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Engagement {
     ImpredicativeSet,
     PredicativeSet,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct PolArity {
     #[serde(deserialize_state)] param_levels: List<Opt<Level>>,
     #[serde(deserialize_state)] level: Univ,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum CstType {
     TemplateArity(#[serde(deserialize_state)] ORef<(Rctxt, PolArity)>),
     RegularArity(#[serde(deserialize_state)] Constr),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum CstDef {
     OpaqueDef(#[serde(deserialize_state)] ORef<LazyConstr>),
@@ -389,11 +393,11 @@ pub enum CstDef {
     Undef(Opt<Int>),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct ProjEta(#[serde(deserialize_state)] Constr, #[serde(deserialize_state)] Constr);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct ProjBody {
     #[serde(deserialize_state)] ind: Cst,
@@ -404,7 +408,7 @@ pub struct ProjBody {
     #[serde(deserialize_state)] body: Constr,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct TypingFlags {
     check_guarded: Bool,
@@ -413,7 +417,7 @@ pub struct TypingFlags {
 
 // static CONST_UNIVS : ValueS = SUM!("constant_universes", 0, [CONTEXT], [ABS_CONTEXT]);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Cb {
     #[serde(deserialize_state)] hyps: SectionCtxt,
@@ -427,7 +431,7 @@ pub struct Cb {
     #[serde(deserialize_state)] typing_flags: TypingFlags,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum RecArg {
     Norec,
@@ -435,7 +439,7 @@ pub enum RecArg {
     Mrec(#[serde(deserialize_state)] ORef<Ind>),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Wfp {
     Rec(Int, #[serde(deserialize_state)] Array<Wfp>),
@@ -443,21 +447,21 @@ pub enum Wfp {
     Param(Int, Int),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct MonoIndArity {
     #[serde(deserialize_state)] user_arity: Constr,
     #[serde(deserialize_state)] sort: Sort,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum IndArity {
     TemplateArity(#[serde(deserialize_state)] PolArity),
     RegularArity(#[serde(deserialize_state)] MonoIndArity),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct OneInd {
     #[serde(deserialize_state)] typename: Id,
@@ -477,7 +481,7 @@ pub struct OneInd {
     #[serde(deserialize_state)] reloc_tbl: Any,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Finite {
     Finite,
@@ -485,7 +489,7 @@ pub enum Finite {
     BiFinite,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct RecordBody(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] Array<Cst>, #[serde(deserialize_state)] Array<ProjBody>);
 
@@ -497,7 +501,7 @@ pub type MindRecord = Opt<Opt<RecordBody>>;
     [ABS_CUM_INFO]
 ); */
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct IndPack {
     #[serde(deserialize_state)] packets: Array<OneInd>,
@@ -514,18 +518,18 @@ pub struct IndPack {
     #[serde(deserialize_state)] typing_flags: TypingFlags,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct WithDef(#[serde(deserialize_state)] Constr, #[serde(deserialize_state)] Context);
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum With {
     Def(#[serde(deserialize_state)] List<Id>, #[serde(deserialize_state)] WithDef),
     Mod(#[serde(deserialize_state)] List<Id>, #[serde(deserialize_state)] Mp),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Mae {
     With(#[serde(deserialize_state)] ORef<Mae>, #[serde(deserialize_state)] With),
@@ -533,7 +537,7 @@ pub enum Mae {
     Ident(#[serde(deserialize_state)] Mp),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Sfb {
     ModType(#[serde(deserialize_state)] ModType),
@@ -542,27 +546,27 @@ pub enum Sfb {
     Const(#[serde(deserialize_state)] Cb),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct StructureBody(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] ORef<Sfb>);
 
 pub type Struc = List<StructureBody>;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Sign {
     MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] ORef<ModType>, #[serde(deserialize_state)] ORef<Sign>),
     NoFunctor(#[serde(deserialize_state)] Struc),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum MExpr {
     MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] ORef<ModType>, #[serde(deserialize_state)] ORef<MExpr>),
     NoFunctor(#[serde(deserialize_state)] Mae),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Impl {
     Abstract,
@@ -571,13 +575,13 @@ pub enum Impl {
     Algebraic(#[serde(deserialize_state)] MExpr),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum NoImpl {
     Abstract,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Module {
     #[serde(deserialize_state)] mp: Mp,
@@ -589,7 +593,7 @@ pub struct Module {
     #[serde(deserialize_state)] retroknowledge: Any,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct ModType {
     #[serde(deserialize_state)] mp: Mp,
@@ -603,20 +607,20 @@ pub struct ModType {
 
 /* kernel/safe_typing */
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum VoDigest {
     Dviovo(#[serde(deserialize_state)] Str, #[serde(deserialize_state)] Str),
     Dvo(#[serde(deserialize_state)] Str),
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct LibraryInfo(#[serde(deserialize_state)] Dp, #[serde(deserialize_state)] VoDigest);
 
 pub type Deps = Array<LibraryInfo>;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct CompiledLib {
     #[serde(deserialize_state)] name: Dp,
@@ -630,13 +634,13 @@ pub struct CompiledLib {
 
 pub type Obj = Dyn;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct LibObj(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] Obj);
 
 pub type LibObjs = List<LibObj>;
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct LibraryObjs {
     #[serde(deserialize_state)] compiled: LibObjs,
@@ -707,7 +711,7 @@ let v_stm_seg = v_pair v_tasks v_counters
 
 /* Toplevel structures in a vo (see Cic.mli) */
 
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct LibSum {
     #[serde(deserialize_state)] name: Dp,
@@ -715,7 +719,7 @@ pub struct LibSum {
     #[serde(deserialize_state)] deps: Deps,
 }
 
-#[derive(Debug, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Lib {
     #[serde(deserialize_state)] compiled: CompiledLib,
@@ -724,7 +728,7 @@ pub struct Lib {
 
 pub type Opaques = Array<Computation<Constr>>;
 
-#[derive(Debug,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct UnivTable(#[serde(deserialize_state)] Array<Computation<ContextSet>>, #[serde(deserialize_state)] ContextSet, Bool);
 

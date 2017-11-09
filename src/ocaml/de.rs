@@ -9,13 +9,13 @@ use vec_map::{VecMap};
 use std::any::Any;
 use serde::de::{Error as DeError, IntoDeserializer};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ORef<T>(pub Rc<T>);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Array<T>(pub Rc<Vec<T>>);
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Str(pub Rc<Vec<u8>>);
 
 #[derive(Debug)]
@@ -789,6 +789,37 @@ impl<'s, 'de, T> serde::de::DeserializeState<'de, Seed<'s>> for Array<T>
         Ok(Array(res))
         // if res.is_ok() { /* println!("Done deserializing seq: {}", self)*/ };
         // res
+    }
+}
+
+impl<T> ::std::ops::Deref for Array<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T> ::std::ops::Deref for ORef<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl ::std::ops::Deref for Str {
+    type Target = Vec<u8>;
+    fn deref(&self) -> &Vec<u8> {
+        &self.0
+    }
+}
+
+impl<'s, 'de> serde::de::DeserializeState<'de, Seed<'s>> for !
+{
+    fn deserialize_state<'seed, D>(_: &'seed mut Seed<'s>, _: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        Err(D::Error::custom(Error::DeserializeAnyNotSupported))
     }
 }
 
