@@ -20,6 +20,8 @@ use core::nonzero::NonZero;
 use ocaml::de::{Array, ORef};
 use std::borrow::{Cow};
 
+type MRef<'b, T> = &'b ORef<T>;
+
 /*
  * Five kinds of reductions:
  *
@@ -62,7 +64,7 @@ pub struct Context<T> {
     // subs_arena: Arena<Subs<T>>,
 }
 
-pub type TableKeyC = TableKey<ORef<PUniverses<Cst>>>;
+pub type TableKeyC<'b> = TableKey<MRef<'b, PUniverses<Cst>>>;
 
 #[derive(Copy,Clone,Debug,PartialEq)]
 pub enum RedState {
@@ -94,13 +96,13 @@ impl RedState {
 /// Clone of the constr structure, but completely mutable, and
 /// annotated with reduction state (reducible or not).
 #[derive(Clone,Debug)]
-pub struct FConstr<'a> {
+pub struct FConstr<'a, 'b> where 'b: 'a {
     norm: Cell<RedState>,
-    term: Cell<Option<&'a FTerm<'a>>>,
+    term: Cell<Option<&'a FTerm<'a, 'b>>>,
 }
 
-impl<'a> FConstr<'a> {
-    pub fn fterm(&self) -> Option<&'a FTerm<'a>> {
+impl<'a, 'b> FConstr<'a, 'b> {
+    pub fn fterm(&self) -> Option<&'a FTerm<'a, 'b>> {
         self.term.get()
     }
 
@@ -108,13 +110,13 @@ impl<'a> FConstr<'a> {
         self.norm.set(RedState::Norm)
     }
 
-    pub fn update(&self, no: RedState, term: Option<&'a FTerm<'a>>) {
+    pub fn update(&self, no: RedState, term: Option<&'a FTerm<'a, 'b>>) {
         // Could issue a warning if no is still Red, pointing out that we lose sharing.
         self.norm.set(no);
         self.term.set(term);
     }
 
-    pub fn lft(&self, mut n: Idx, ctx: &'a Context<FTerm<'a>>) -> IdxResult<Self> {
+    pub fn lft(&self, mut n: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
         let mut ft = self;
         loop {
             match *ft.fterm().expect("Tried to lift a locked term") {
@@ -124,30 +126,30 @@ impl<'a> FConstr<'a> {
                     norm: Cell::new(RedState::Norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(i.checked_add(n)?)))),
                 }),
-                FTerm::Lambda(ref tys, ref f, ref e) => {
+                FTerm::Lambda(ref tys, f, ref e) => {
                     let mut e = e.clone(); // expensive
                     e.shift(n)?;
                     return Ok(FConstr {
                         norm: Cell::new(RedState::Cstr),
                         term: Cell::new(Some(
                                 ctx.term_arena.alloc(FTerm::Lambda(tys.clone(), // expensive
-                                                                   f.clone(), e)))),
+                                                                   f, e)))),
                     })
                 },
-                FTerm::Fix(ref fx, ref e) => {
+                FTerm::Fix(fx, ref e) => {
                     let mut e = e.clone(); // expensive
                     e.shift(n)?;
                     return Ok(FConstr {
                         norm: Cell::new(RedState::Cstr),
-                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(fx.clone(), e)))),
+                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(fx, e)))),
                     })
                 },
-                FTerm::CoFix(ref cfx, ref e) => {
+                FTerm::CoFix(cfx, ref e) => {
                     let mut e = e.clone(); // expensive
                     e.shift(n)?;
                     return Ok(FConstr {
                         norm: Cell::new(RedState::Cstr),
-                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(cfx.clone(), e)))),
+                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(cfx, e)))),
                     })
                 },
                 FTerm::Lift(k, ref m) => {
@@ -163,7 +165,7 @@ impl<'a> FConstr<'a> {
     }
 
     /// Lifting specialized to the case where n = 0.
-    pub fn lft0(&self, ctx: &'a Context<FTerm<'a>>) -> IdxResult<Self> {
+    pub fn lft0(&self, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
         match *self.fterm().expect("Tried to lift a locked term") {
             FTerm::Ind(_) | FTerm::Construct(_)
             | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => Ok(self.clone()),
@@ -182,8 +184,8 @@ impl<'a> FConstr<'a> {
 
     /// The inverse of mk_clos_deep: move back to constr
     fn to_constr<F>(&self, constr_fun: F, lfts: &Lift,
-                    ctx: &'a Context<FTerm<'a>>) -> IdxResult<Constr>
-        where F: Fn(&FConstr<'a>, &Lift, &'a Context<FTerm<'a>>) -> IdxResult<Constr>,
+                    ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr>
+        where F: Fn(&FConstr<'a, 'b>, &Lift, &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr>,
     {
         /* let mut norm_ = self.norm.get();
         let mut term_ = Cow::Borrowed(self.fterm().expect("Tried to lift a locked term!"));*/
@@ -195,22 +197,22 @@ impl<'a> FConstr<'a> {
                 FTerm::Flex(TableKey::RelKey(i)) =>
                     return Ok(Constr::Rel(i32::from(lfts.reloc_rel(i)?) as i64)),
                 // | FFlex (VarKey x) -> Var x
-                FTerm::Atom(ref c) => {
+                FTerm::Atom(c) => {
                     // Unless something weird is happening, this should be a cheap operation,
                     // because atoms should only contain sorts in our implementation (so this just
                     // becomes a clone()).  Really, this could probably just be replaced by a
                     // c.clone(), for more clarity.
                     return c.exliftn(&lfts)
                 },
-                FTerm::Cast(ref a, ref k, ref b) => {
+                FTerm::Cast(ref a, k, ref b) => {
                     let a = constr_fun(a, &lfts, ctx)?;
                     let b = constr_fun(b, &lfts, ctx)?;
                     return Ok(Constr::Cast(ORef(Rc::from((a, k.1, b)))))
                 },
-                FTerm::Flex(TableKey::ConstKey(ref c)) => return Ok(Constr::Const(c.clone())),
-                FTerm::Ind(ref op) => return Ok(Constr::Ind(op.clone())),
-                FTerm::Construct(ref op) => return Ok(Constr::Construct(op.clone())),
-                FTerm::Case(ref ci, ref p, ref c, ref ve) => {
+                FTerm::Flex(TableKey::ConstKey(c)) => return Ok(Constr::Const(c.clone())),
+                FTerm::Ind(op) => return Ok(Constr::Ind(op.clone())),
+                FTerm::Construct(op) => return Ok(Constr::Construct(op.clone())),
+                FTerm::Case(ci, ref p, ref c, ref ve) => {
                     let (ref ci, _, _, _) = **ci;
                     let p = constr_fun(p, &lfts, ctx)?;
                     let c = constr_fun(c, &lfts, ctx)?;
@@ -221,7 +223,7 @@ impl<'a> FConstr<'a> {
                     return Ok(Constr::Case(ORef(Rc::from((ci.clone(), p, c,
                                                           Array(Rc::from(ve?)))))))
                 },
-                FTerm::CaseT(ref ci, ref c, ref e) => {
+                FTerm::CaseT(ci, ref c, ref e) => {
                     /*
                     // FIXME: Do we really need to create a new FTerm here?  Aren't we just going
                     // to immediately turn it back into a Term?  It seems like it would be better
@@ -238,13 +240,13 @@ impl<'a> FConstr<'a> {
                     let c = constr_fun(c, &lfts, ctx)?;
                     // expensive -- allocates a Vec
                     let ve: Result<Vec<_>, _> = ve.iter()
-                        .map( |t| e.mk_clos(t.clone(), ctx))
+                        .map( |t| e.mk_clos(t, ctx))
                         .map( |v| constr_fun(&v?, &lfts, ctx) )
                         .collect();
                     return Ok(Constr::Case(ORef(Rc::from((ci.clone(), p, c,
                                                           Array(Rc::from(ve?)))))))
                 },
-                FTerm::Fix(ref o, ref e) => {
+                FTerm::Fix(o, ref e) => {
                     // FIXME: The recursion here seems like it potentially wastes a lot of work
                     // converting Constrs to FTerms and back... same with CoFix below, and possibly
                     // CaseT above to some extent.  Also, we probably prematurely allocate a few
@@ -253,7 +255,7 @@ impl<'a> FConstr<'a> {
                     let Fix(ref op, PRec(ref lna, ref tys, ref bds)) = **o;
                     // expensive, makes a Vec
                     let ftys: Result<Vec<_>, _> = tys.iter()
-                        .map( |t| e.mk_clos(t.clone(), ctx))
+                        .map( |t| e.mk_clos(t, ctx))
                         .map( |t| constr_fun(&t?, &lfts, ctx))
                         .collect();
                     // Note: I believe the length should always be nonzero here, but I'm not 100%
@@ -271,13 +273,13 @@ impl<'a> FConstr<'a> {
                         let mut lfts = lfts.into_owned();
                         lfts.liftn(n)?;
                         bds.iter()
-                           .map( |t| e.mk_clos(t.clone(), ctx))
+                           .map( |t| e.mk_clos(t, ctx))
                            .map( |t| constr_fun(&t?, &lfts, ctx))
                            .collect()
                     } else {
                         // expensive, makes a Vec
                         bds.iter()
-                           .map( |t| e.mk_clos(t.clone(), ctx))
+                           .map( |t| e.mk_clos(t, ctx))
                            .map( |t| constr_fun(&t?, &lfts, ctx))
                            .collect()
                     };
@@ -286,11 +288,11 @@ impl<'a> FConstr<'a> {
                                                                  Array(Rc::new(ftys?)),
                                                                  Array(Rc::new(fbds?))))))))
                 },
-                FTerm::CoFix(ref o, ref e) => {
+                FTerm::CoFix(o, ref e) => {
                     let CoFix(op, PRec(ref lna, ref tys, ref bds)) = **o;
                     // expensive, makes a Vec
                     let ftys: Result<Vec<_>, _> = tys.iter()
-                        .map( |t| e.mk_clos(t.clone(), ctx))
+                        .map( |t| e.mk_clos(t, ctx))
                         .map( |t| constr_fun(&t?, &lfts, ctx))
                         .collect();
                     // expensive, makes a Vec
@@ -302,13 +304,13 @@ impl<'a> FConstr<'a> {
                         let mut lfts = lfts.into_owned();
                         lfts.liftn(n)?;
                         bds.iter()
-                           .map( |t| e.mk_clos(t.clone(), ctx))
+                           .map( |t| e.mk_clos(t, ctx))
                            .map( |t| constr_fun(&t?, &lfts, ctx))
                            .collect()
                     } else {
                         // expensive, makes a Vec
                         bds.iter()
-                           .map( |t| e.mk_clos(t.clone(), ctx))
+                           .map( |t| e.mk_clos(t, ctx))
                            .map( |t| constr_fun(&t?, &lfts, ctx))
                            .collect()
                     };
@@ -325,12 +327,12 @@ impl<'a> FConstr<'a> {
                         .collect();
                     return Ok(Constr::App(ORef(Rc::from((f, Array(Rc::from(ve?)))))))
                 },
-                FTerm::Proj(ref o, ref c) => {
+                FTerm::Proj(o, ref c) => {
                     let (ref p, _) = **o;
                     let c = constr_fun(c, &lfts, ctx)?;
                     return Ok(Constr::Proj(ORef(Rc::from((p.clone(), c)))))
                 },
-                FTerm::Lambda(ref tys, ref b, ref e) => {
+                FTerm::Lambda(ref tys, b, ref e) => {
                     // We should know v is nonzero, if Lambda was created properly.
                     // TODO: Enforce this by construction with a Lambda newtype in this file.
                     // FIXME: Is converting to dest_flambda only to convert back to a Lambda really
@@ -346,29 +348,32 @@ impl<'a> FConstr<'a> {
                     // course, because of this maybe dest_flambda isn't even needed here).
                     let mut tys = tys.clone(); // expensive
                     let (na, ty, bd) =
-                        FTerm::dest_flambda(Subs::mk_clos2, tys, b.clone(), e, ctx)?;
+                        FTerm::dest_flambda(Subs::mk_clos2, tys, b, e, ctx)?;
                     let ty = constr_fun(&ty, &lfts, ctx)?;
-                    let mut lfts = lfts.into_owned(); // expensive, but shouldn't outlive this block.
+                    // expensive, but shouldn't outlive this block.
+                    let mut lfts = lfts.into_owned();
                     lfts.lift()?;
                     let bd = constr_fun(&bd, &lfts, ctx)?;
                     return Ok(Constr::Lambda(ORef(Rc::from((na, ty, bd)))))
                 },
-                FTerm::Prod(ref o, ref t, ref c) => {
+                FTerm::Prod(o, ref t, ref c) => {
                     let (ref n, _, _) = **o;
                     let t = constr_fun(t, &lfts, ctx)?;
-                    let mut lfts = lfts.into_owned(); // expensive, but shouldn't outlive this block.
+                    // expensive, but shouldn't outlive this block.
+                    let mut lfts = lfts.into_owned();
                     lfts.lift()?;
                     let c = constr_fun(c, &lfts, ctx)?;
                     return Ok(Constr::Prod(ORef(Rc::from((n.clone(), t, c)))))
                 },
-                FTerm::LetIn(ref o, ref b, ref t, ref e) => {
+                FTerm::LetIn(o, ref b, ref t, ref e) => {
                     let (ref n, _, _, ref f) = **o;
                     let b = constr_fun(b, &lfts, ctx)?;
                     let t = constr_fun(t, &lfts, ctx)?;
                     let mut e = e.clone(); // expensive, but shouldn't outlive this block.
                     e.lift()?;
                     let fc = e.mk_clos2(f, ctx)?;
-                    let mut lfts = lfts.into_owned(); // expensive, but shouldn't outlive this block.
+                    // expensive, but shouldn't outlive this block.
+                    let mut lfts = lfts.into_owned();
                     lfts.lift()?;
                     let fc = constr_fun(&fc, &lfts, ctx)?;
                     return Ok(Constr::LetIn(ORef(Rc::from((n.clone(), b, t, fc)))))
@@ -382,7 +387,7 @@ impl<'a> FConstr<'a> {
                     // term_ = Cow::Borrowed(a.fterm().expect("Tried to lift a locked term!"));
                     v = a;
                 },
-                FTerm::Clos(ref t, ref env) => {
+                FTerm::Clos(t, ref env) => {
                     let fr = env.mk_clos2(t, ctx)?;
                     // TODO: check whether the update here is useful.  If so, we should
                     // slightly change the function definition.
@@ -395,8 +400,8 @@ impl<'a> FConstr<'a> {
     }
 }
 
-impl<'a> Subs<FConstr<'a>> {
-    pub fn clos_rel(&self, i: Idx, ctx: &'a Context<FTerm<'a>>) -> IdxResult<FConstr<'a>> {
+impl<'a, 'b> Subs<FConstr<'a, 'b>> {
+    pub fn clos_rel(&self, i: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
         match self.expand_rel(i)? {
             (n, Expr::Val(mt)) => mt.lft(n, ctx),
             (k, Expr::Var(None)) => Ok(FConstr {
@@ -424,8 +429,10 @@ impl<'a> Subs<FConstr<'a>> {
         }
     }
 
-    pub fn mk_lambda(self, t: ORef<(Name, Constr, Constr)>) -> IdxResult<FTerm<'a>> {
-        let t = Constr::Lambda(t);
+    pub fn mk_lambda(self,
+                     /*t: ORef<(Name, Constr, Constr)>*/
+                     t: &'b Constr) -> IdxResult<FTerm<'a, 'b>> {
+        // let t = Constr::Lambda(t);
         let (mut rvars, t_) = t.decompose_lam(); // expensive because it allocates a new vector.
         // We know rvars.len() is nonzero.
         // let idx = Idx::new(NonZero::new(rvars.len())
@@ -441,15 +448,16 @@ impl<'a> Subs<FConstr<'a>> {
                          // reference to the topmost ORef, and an indication of the length?  That
                          // would avoid allocations altogether.  What would be the disadvantage
                          // of that, given how the FLambda appears to be used?
-        Ok(FTerm::Lambda(rvars, t_.clone(), self))
+        Ok(FTerm::Lambda(rvars, t_, self))
     }
 
     /// Optimization: do not enclose variables in a closure.
     /// Makes variable access much faster
-    pub fn mk_clos(&self, t: Constr, ctx: &'a Context<FTerm<'a>>) -> IdxResult<FConstr<'a>> {
-        match t {
+    pub fn mk_clos(&self, t: &'b Constr,
+                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+        match *t {
             Constr::Rel(i) => { self.clos_rel(Idx::new(NonZero::new(i)?)?, ctx) },
-            Constr::Const(c) => Ok(FConstr {
+            Constr::Const(ref c) => Ok(FConstr {
                 norm: Cell::new(RedState::Red),
                 term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Flex(TableKey::ConstKey(c))))),
             }),
@@ -459,11 +467,11 @@ impl<'a> Subs<FConstr<'a>> {
                 norm: Cell::new(RedState::Norm),
                 term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Atom(t)))),
             }),
-            Constr::Ind(kn) => Ok(FConstr {
+            Constr::Ind(ref kn) => Ok(FConstr {
                 norm: Cell::new(RedState::Norm),
                 term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Ind(kn)))),
             }),
-            Constr::Construct(kn) => Ok(FConstr {
+            Constr::Construct(ref kn) => Ok(FConstr {
                 norm: Cell::new(RedState::Cstr),
                 term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Construct(kn)))),
             }),
@@ -479,44 +487,45 @@ impl<'a> Subs<FConstr<'a>> {
         }
     }
 
-    pub fn mk_clos_vect(&self, v: &[Constr],
-                        ctx: &'a Context<FTerm<'a>>) -> IdxResult<Vec<FConstr<'a>>> {
+    pub fn mk_clos_vect(&self, v: &'b [Constr],
+                        ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Vec<FConstr<'a, 'b>>> {
         // Expensive, makes a vector
-        v.into_iter().map( |t| self.mk_clos(t.clone(), ctx)).collect()
+        v.into_iter().map( |t| self.mk_clos(t, ctx)).collect()
     }
 
     /// Translate the head constructor of t from constr to fconstr. This
     /// function is parameterized by the function to apply on the direct
     /// subterms.
     /// Could be used insted of mk_clos.
-    pub fn mk_clos_deep<F>(&self, clos_fun: F, t: &Constr,
-                           ctx: &'a Context<FTerm<'a>>) -> IdxResult<FConstr<'a>>
-        where F: Fn(&Subs<FConstr<'a>>, Constr, &'a Context<FTerm<'a>>) -> IdxResult<FConstr<'a>>,
+    pub fn mk_clos_deep<F>(&self, clos_fun: F, t: &'b Constr,
+                           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>
+        where F: Fn(&Subs<FConstr<'a, 'b>>,
+                    &'b Constr, &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>,
     {
         match *t {
             Constr::Rel(_) | Constr::Ind(_) |
             Constr::Const(_) | Constr::Construct(_) |
             // Constr::Var(_) | Constr::Meta(_) | Constr::Evar(_)
-            Constr::Sort(_) => self.mk_clos(t.clone(), ctx),
+            Constr::Sort(_) => self.mk_clos(t, ctx),
             Constr::Cast(ref o) => {
                 let (a, b) = {
                     let (ref a, _, ref b) = **o;
-                    let a = clos_fun(self, a.clone(), ctx)?;
-                    let b = clos_fun(self, b.clone(), ctx)?;
+                    let a = clos_fun(self, a, ctx)?;
+                    let b = clos_fun(self, b, ctx)?;
                     (a, b)
                 };
                 Ok(FConstr {
                     norm: Cell::new(RedState::Red),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Cast(a, o.clone(), b)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Cast(a, o, b)))),
                 })
             },
             Constr::App(ref o) => {
                 let (f, v) = {
                     let (ref f, ref v) = **o;
-                    let f = clos_fun(self, f.clone(), ctx)?;
+                    let f = clos_fun(self, f, ctx)?;
                     // Expensive, makes a vector
                     let v: Result<_, _> =
-                        v.iter().map( |t| clos_fun(self, t.clone(), ctx))
+                        v.iter().map( |t| clos_fun(self, t, ctx))
                          .collect();
                     (f, v?)
                 };
@@ -528,71 +537,71 @@ impl<'a> Subs<FConstr<'a>> {
             Constr::Proj(ref o) => {
                 let c = {
                     let (_, ref c) = **o;
-                    clos_fun(self, c.clone(), ctx)?
+                    clos_fun(self, c, ctx)?
                 };
                 Ok(FConstr {
                     norm: Cell::new(RedState::Red),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(o.clone(), c)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(o, c)))),
                 })
             },
             Constr::Case(ref o) => {
                 let c = {
                     let (_, _, ref c, _) = **o;
-                    clos_fun(self, c.clone(), ctx)?
+                    clos_fun(self, c, ctx)?
                 };
                 let env = self.clone(); // expensive
                 Ok(FConstr {
                     norm: Cell::new(RedState::Red),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CaseT(o.clone(), c, env)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CaseT(o, c, env)))),
                 })
             },
             Constr::Fix(ref o) => {
                 let env = self.clone(); // expensive
                 Ok(FConstr {
                     norm: Cell::new(RedState::Cstr),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(o.clone(), env)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(o, env)))),
                 })
             },
             Constr::CoFix(ref o) => {
                 let env = self.clone(); // expensive
                 Ok(FConstr {
                     norm: Cell::new(RedState::Cstr),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(o.clone(), env)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(o, env)))),
                 })
             },
-            Constr::Lambda(ref o) => {
+            Constr::Lambda(_) => {
                 let env = self.clone(); // expensive
                 Ok(FConstr {
                     norm: Cell::new(RedState::Cstr),
-                    term: Cell::new(Some(ctx.term_arena.alloc(env.mk_lambda(o.clone())?))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(env.mk_lambda(t)?))),
                 })
             },
             Constr::Prod(ref o) => {
                 let (t, c) = {
                     let (_, ref t, ref c) = **o;
-                    let t = clos_fun(self, t.clone(), ctx)?;
+                    let t = clos_fun(self, t, ctx)?;
                     // expensive, but doesn't outlive this block.
                     let mut env = self.clone();
                     env.lift()?;
-                    let c = clos_fun(&env, c.clone(), ctx)?;
+                    let c = clos_fun(&env, c, ctx)?;
                     (t, c)
                 };
                 Ok(FConstr {
                     norm: Cell::new(RedState::Whnf),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Prod(o.clone(), t, c)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Prod(o, t, c)))),
                 })
             },
             Constr::LetIn(ref o) => {
                 let (b, t) = {
                     let (_, ref b, ref t, _) = **o;
-                    let b = clos_fun(self, b.clone(), ctx)?;
-                    let t = clos_fun(self, t.clone(), ctx)?;
+                    let b = clos_fun(self, b, ctx)?;
+                    let t = clos_fun(self, t, ctx)?;
                     (b, t)
                 };
                 let env = self.clone(); // expensive
                 Ok(FConstr {
                     norm: Cell::new(RedState::Red),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::LetIn(o.clone(),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::LetIn(o,
                                                               b, t, env)))),
                 })
             },
@@ -600,38 +609,42 @@ impl<'a> Subs<FConstr<'a>> {
     }
 
     /// A better mk_clos?
-    pub fn mk_clos2(&self, t: &Constr, ctx: &'a Context<FTerm<'a>>) -> IdxResult<FConstr<'a>> {
+    pub fn mk_clos2(&self, t: &'b Constr,
+                    ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
         self.mk_clos_deep((Subs::<FConstr>::mk_clos), t, ctx)
     }
 }
 
 #[derive(Clone,Debug)]
-pub enum FTerm<'a> {
+pub enum FTerm<'a, 'b> where 'b: 'a {
   Rel(Idx),
   /// Metas and sorts; but metas shouldn't occur in a .vo...
-  Atom(Constr),
-  Cast(FConstr<'a>, ORef<(Constr, Cast, Constr)>, FConstr<'a>),
-  Flex(TableKeyC),
-  Ind(ORef<PUniverses<Ind>>),
-  Construct(ORef<PUniverses<Cons>>),
-  App(FConstr<'a>, Vec<FConstr<'a>>),
-  Proj(ORef<(Proj, Constr)>, FConstr<'a>),
-  Fix(ORef<Fix>, Subs<FConstr<'a>>),
-  CoFix(ORef<CoFix>, Subs<FConstr<'a>>),
-  Case(ORef<(CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a>, FConstr<'a>,
-       Vec<FConstr<'a>>),
+  Atom(&'b Constr),
+  Cast(FConstr<'a, 'b>, MRef<'b, (Constr, Cast, Constr)>, FConstr<'a, 'b>),
+  Flex(TableKeyC<'b>),
+  Ind(MRef<'b, PUniverses<Ind>>),
+  Construct(MRef<'b, PUniverses<Cons>>),
+  App(FConstr<'a, 'b>, Vec<FConstr<'a, 'b>>),
+  Proj(MRef<'b, (Proj, Constr)>, FConstr<'a, 'b>),
+  Fix(MRef<'b, Fix>, Subs<FConstr<'a, 'b>>),
+  CoFix(MRef<'b, CoFix>, Subs<FConstr<'a, 'b>>),
+  Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>, FConstr<'a, 'b>,
+       Vec<FConstr<'a, 'b>>),
   /// predicate and branches are closures
-  CaseT(ORef<(CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a>, Subs<FConstr<'a>>),
-  Lambda(Vec</*(Name, Constr)*/ORef<(Name, Constr, Constr)>>, Constr, Subs<FConstr<'a>>),
-  Prod(ORef<(Name, Constr, Constr)>, FConstr<'a>, FConstr<'a>),
-  LetIn(ORef<(Name, Constr, Constr, Constr)>, FConstr<'a>, FConstr<'a>, Subs<FConstr<'a>>),
+  CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
+        Subs<FConstr<'a, 'b>>),
+  Lambda(Vec</*(Name, Constr)*/MRef<'b, (Name, Constr, Constr)>>,
+         &'b Constr, Subs<FConstr<'a, 'b>>),
+  Prod(MRef<'b, (Name, Constr, Constr)>, FConstr<'a, 'b>, FConstr<'a, 'b>),
+  LetIn(MRef<'b, (Name, Constr, Constr, Constr)>,
+        FConstr<'a, 'b>, FConstr<'a, 'b>, Subs<FConstr<'a, 'b>>),
   // should not occur
   // | FEvar of existential_key * fconstr array (* why diff from kernel/closure? *)
   /// FLIFT is a delayed shift; allows sharing between 2 lifted copies
   /// of a given term.
-  Lift(Idx, FConstr<'a>),
+  Lift(Idx, FConstr<'a, 'b>),
   /// FCLOS is a delayed substitution applied to a constr
-  Clos(Constr, Subs<FConstr<'a>>),
+  Clos(&'b Constr, Subs<FConstr<'a, 'b>>),
   // /// FLOCKED is used to erase the content of a reference that must
   // /// be updated. This is to allow the garbage collector to work
   // /// before the term is computed.
@@ -639,37 +652,38 @@ pub enum FTerm<'a> {
 }
 
 /// The type of (machine) stacks (= lambda-bar-calculus' contexts)
-pub enum StackMember<'a> {
-    App(Vec<FConstr<'a>>),
-    Case(ORef<(CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a>, Vec<FConstr<'a>>),
-    CaseT(ORef<(CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a>>),
+pub enum StackMember<'a, 'b> where 'b: 'a {
+    App(Vec<FConstr<'a, 'b>>),
+    Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
+         Vec<FConstr<'a, 'b>>),
+    CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>),
     Proj(Idx, Idx, ORef<(Proj, Constr)>),
-    Fix(FConstr<'a>, Stack<'a>),
+    Fix(FConstr<'a, 'b>, Stack<'a, 'b>),
     Shift(Idx),
-    Update(FConstr<'a>),
+    Update(FConstr<'a, 'b>),
 }
 
-pub struct Stack<'a>(Vec<StackMember<'a>>);
+pub struct Stack<'a, 'b>(Vec<StackMember<'a, 'b>>) where 'b: 'a;
 
-impl<'a> ::std::ops::Deref for Stack<'a> {
-    type Target = Vec<StackMember<'a>>;
-    fn deref(&self) -> &Vec<StackMember<'a>> {
+impl<'a, 'b> ::std::ops::Deref for Stack<'a, 'b> {
+    type Target = Vec<StackMember<'a, 'b>>;
+    fn deref(&self) -> &Vec<StackMember<'a, 'b>> {
         &self.0
     }
 }
 
-impl<'a> ::std::ops::DerefMut for Stack<'a> {
-    fn deref_mut(&mut self) -> &mut Vec<StackMember<'a>> {
+impl<'a, 'b> ::std::ops::DerefMut for Stack<'a, 'b> {
+    fn deref_mut(&mut self) -> &mut Vec<StackMember<'a, 'b>> {
         &mut self.0
     }
 }
 
-impl<'a> Stack<'a> {
-    fn push(&mut self, o: StackMember<'a>) -> IdxResult<()> {
+impl<'a, 'b> Stack<'a, 'b> {
+    fn push(&mut self, o: StackMember<'a, 'b>) -> IdxResult<()> {
         self.0.push(o);
         Ok(())
     }
-    pub fn append(&mut self, s: Vec<FConstr<'a>>) -> IdxResult<()> {
+    pub fn append(&mut self, s: Vec<FConstr<'a, 'b>>) -> IdxResult<()> {
         if let Some(&mut StackMember::App(ref mut l)) = self.last_mut() {
             l.extend(s.into_iter());
             return Ok(())
@@ -687,7 +701,8 @@ impl<'a> Stack<'a> {
 
     // since the head may be reducible, we might introduce lifts of 0
     // FIXME: Above comment is not currently true.  Should it be?
-    pub fn compact(&mut self, head: &FConstr<'a>, ctx: &'a Context<FTerm<'a>>) -> IdxResult<()> {
+    pub fn compact(&mut self, head: &FConstr<'a, 'b>,
+                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
@@ -722,7 +737,8 @@ impl<'a> Stack<'a> {
     }
 
     /// Put an update mark in the stack, only if needed
-    pub fn update(&mut self, m: FConstr<'a>, ctx: &'a Context<FTerm<'a>>) -> IdxResult<()> {
+    pub fn update(&mut self, m: FConstr<'a, 'b>,
+                  ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
         if m.norm.get() == RedState::Red {
             // const LOCKED: &'static FTerm<'static> = &FTerm::Locked;
             self.compact(&m, ctx)?;
@@ -732,21 +748,22 @@ impl<'a> Stack<'a> {
     }
 }
 
-impl<'a> FTerm<'a> {
+impl<'a, 'b> FTerm<'a, 'b> {
     /// Do not call this function unless tys.len() ≥ 1.
     pub fn dest_flambda<F>(clos_fun: F,
-                           mut tys: Vec</*(Name, Constr)*/ORef<(Name, Constr, Constr)>>,
-                           b: Constr,
-                           e: &Subs<FConstr<'a>>,
-                           ctx: &'a Context<FTerm<'a>>) ->
-        IdxResult<(Name, FConstr<'a>, FConstr<'a>)>
-        where F: Fn(&Subs<FConstr<'a>>, &Constr, &'a Context<FTerm<'a>>) -> IdxResult<FConstr<'a>>,
+                           mut tys: Vec</*(Name, Constr)*/MRef<'b, (Name, Constr, Constr)>>,
+                           b: &'b Constr,
+                           e: &Subs<FConstr<'a, 'b>>,
+                           ctx: &'a Context<FTerm<'a, 'b>>) ->
+        IdxResult<(Name, FConstr<'a, 'b>, FConstr<'a, 'b>)>
+        where F: Fn(&Subs<FConstr<'a, 'b>>,
+                    &'b Constr, &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>,
     {
         // FIXME: consider using references to slices for FTerm::Lambda arguments instead of Vecs.
         // That would allow us to avoid taking tys by value.  However, this might not matter if it
         // turns out the uses of dest_flambda are inherently wasteful.
         let o = tys.pop().expect("Should not call dest_flambda with tys.len() = 0");
-        let (ref na, ref ty, _) = *o;
+        let (ref na, ref ty, _) = **o;
         let ty = clos_fun(e, ty, ctx)?;
         let mut e = e.clone(); /* expensive */
         e.lift()?;
@@ -762,8 +779,8 @@ impl<'a> FTerm<'a> {
 }
 
 impl Constr {
-    fn of_fconstr_lift<'a>(v: &FConstr<'a>, lfts: &Lift,
-                           ctx: &'a Context<FTerm<'a>>) -> IdxResult<Constr> {
+    fn of_fconstr_lift<'a, 'b>(v: &FConstr<'a, 'b>, lfts: &Lift,
+                           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr> {
         // In general, it might be nice to make this function tail recursive (by using an explicit
         // stack) rather than having confusing mutual recursion between of_fconstr_lift and
         // to_constr.
@@ -772,8 +789,8 @@ impl Constr {
             return v.to_constr(Constr::of_fconstr_lift, lfts, ctx);
         };
         match *term {
-            FTerm::Clos(ref t, ref env) if env.is_id() => Ok(t.clone()),
-            FTerm::Lambda(ref tys, ref f, ref e) if e.is_id() => {
+            FTerm::Clos(t, ref env) if env.is_id() => Ok(t.clone()),
+            FTerm::Lambda(ref tys, f, ref e) if e.is_id() => {
                 // compose_lam (List.rev tys) f
                 // NOTE: Instead of recursively reconstructing the old Lambda term (as the OCaml
                 // implementation does), we assume that the last entry in the tys array (or just f,
@@ -794,10 +811,10 @@ impl Constr {
                 // that is less subtle to verify by inspecting the code).
                 Ok(match tys.last() {
                     None => f.clone(),
-                    Some(o) => Constr::Lambda(o.clone()),
+                    Some(&o) => Constr::Lambda(o.clone()),
                 })
             },
-            FTerm::CaseT(ref o, ref c, ref e) if e.is_id() => {
+            FTerm::CaseT(o, ref c, ref e) if e.is_id() => {
                 // FIXME: Make this tail-recursive / use an explicit stack?
                 // FIXME: Is there any way to determine that the interior term hasn't been touched?
                 // If so, can we reuse the old case allocation?
@@ -805,8 +822,8 @@ impl Constr {
                 let c = Constr::of_fconstr_lift(c, lfts, ctx)?;
                 Ok(Constr::Case(ORef(Rc::from((ci.clone(), p.clone(), c, b.clone())))))
             },
-            FTerm::Fix(ref o, ref e) if e.is_id() => Ok(Constr::Fix(o.clone())),
-            FTerm::CoFix(ref o, ref e) if e.is_id() => Ok(Constr::CoFix(o.clone())),
+            FTerm::Fix(o, ref e) if e.is_id() => Ok(Constr::Fix(o.clone())),
+            FTerm::CoFix(o, ref e) if e.is_id() => Ok(Constr::CoFix(o.clone())),
             _ => v.to_constr(Constr::of_fconstr_lift, lfts, ctx)
         }
     }
@@ -815,7 +832,8 @@ impl Constr {
     /// fconstr. When we find a closure whose substitution is the identity,
     /// then we directly return the constr to avoid possibly huge
     /// reallocation.
-    pub fn of_fconstr<'a>(v: &FConstr<'a>, ctx: &'a Context<FTerm<'a>>) -> IdxResult<Constr> {
+    pub fn of_fconstr<'a, 'b>(v: &FConstr<'a, 'b>,
+                              ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr> {
         let lfts = Lift::id();
         Constr::of_fconstr_lift(v, &lfts, ctx)
     }

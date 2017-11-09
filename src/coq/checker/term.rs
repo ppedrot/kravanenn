@@ -31,7 +31,7 @@ impl Constr {
     ///
     /// (For technical reasons, we carry around the nested constructor as well, but we never need
     /// it).
-    pub fn decompose_lam(&self) -> (Vec<ORef<(Name, Constr, Constr)>>, &Constr) {
+    pub fn decompose_lam(&self) -> (Vec<&ORef<(Name, Constr, Constr)>>, &Constr) {
         let mut l = Vec::new();
         let mut c = self;
         loop {
@@ -39,7 +39,7 @@ impl Constr {
                 Constr::Lambda(ref o) => {
                     let (/*ref x, ref t*/_, _, ref c_) = **o;
                     /* l.push((x, t)); */
-                    l.push(o.clone());
+                    l.push(o);
                     c = c_;
                 },
                 Constr::Cast(ref o) => {
