@@ -19,6 +19,7 @@ use typed_arena::{Arena};
 use core::nonzero::NonZero;
 use ocaml::de::{Array, ORef};
 use std::borrow::{Cow};
+use std::mem;
 
 type MRef<'b, T> = &'b ORef<T>;
 
@@ -81,6 +82,76 @@ pub enum RedState {
     Red,
 }
 
+/// type of shared terms. fconstr and frterm are mutually recursive.
+/// Clone of the constr structure, but completely mutable, and
+/// annotated with reduction state (reducible or not).
+#[derive(Clone,Debug)]
+pub struct FConstr<'a, 'b> where 'b: 'a {
+    norm: Cell<RedState>,
+    term: Cell<Option<&'a FTerm<'a, 'b>>>,
+}
+
+#[derive(Clone,Debug)]
+pub enum FTerm<'a, 'b> where 'b: 'a {
+  Rel(Idx),
+  /// Metas and sorts; but metas shouldn't occur in a .vo...
+  Atom(&'b Constr),
+  Cast(FConstr<'a, 'b>, MRef<'b, (Constr, Cast, Constr)>, FConstr<'a, 'b>),
+  Flex(TableKeyC<'b>),
+  Ind(MRef<'b, PUniverses<Ind>>),
+  Construct(MRef<'b, PUniverses<Cons>>),
+  App(FConstr<'a, 'b>, Vec<FConstr<'a, 'b>>),
+  Proj(MRef<'b, (Proj, Constr)>, FConstr<'a, 'b>),
+  Fix(MRef<'b, Fix>, Subs<FConstr<'a, 'b>>),
+  CoFix(MRef<'b, CoFix>, Subs<FConstr<'a, 'b>>),
+  Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>, FConstr<'a, 'b>,
+       Vec<FConstr<'a, 'b>>),
+  /// predicate and branches are closures
+  CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
+        Subs<FConstr<'a, 'b>>),
+  Lambda(Vec</*(Name, Constr)*/MRef<'b, (Name, Constr, Constr)>>,
+         &'b Constr, Subs<FConstr<'a, 'b>>),
+  Prod(MRef<'b, (Name, Constr, Constr)>, FConstr<'a, 'b>, FConstr<'a, 'b>),
+  LetIn(MRef<'b, (Name, Constr, Constr, Constr)>,
+        FConstr<'a, 'b>, FConstr<'a, 'b>, Subs<FConstr<'a, 'b>>),
+  // should not occur
+  // | FEvar of existential_key * fconstr array (* why diff from kernel/closure? *)
+  /// FLIFT is a delayed shift; allows sharing between 2 lifted copies
+  /// of a given term.
+  Lift(Idx, FConstr<'a, 'b>),
+  /// FCLOS is a delayed substitution applied to a constr
+  Clos(&'b Constr, Subs<FConstr<'a, 'b>>),
+  // /// FLOCKED is used to erase the content of a reference that must
+  // /// be updated. This is to allow the garbage collector to work
+  // /// before the term is computed.
+  // Locked,
+}
+
+/// The type of (machine) stacks (= lambda-bar-calculus' contexts)
+pub enum StackMember<'a, 'b> where 'b: 'a {
+    App(Vec<FConstr<'a, 'b>>),
+    Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
+         Vec<FConstr<'a, 'b>>),
+    CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>),
+    Proj(Idx, Idx, MRef<'b, (Proj, Constr)>),
+    Fix(FConstr<'a, 'b>, Stack<'a, 'b>),
+    Shift(Idx),
+    Update(&'a FConstr<'a, 'b>),
+}
+
+/// A [stack] is a context of arguments, arguments are pushed by
+/// [append_stack] one array at a time but popped with [decomp_stack]
+/// one by one
+pub struct Stack<'a, 'b>(Vec<StackMember<'a, 'b>>) where 'b: 'a;
+
+/// The result of trying to perform beta reduction.
+enum Application<T> {
+    /// Arguments are fully applied; this is the corresponding substitution.
+    Full(Subs<T>),
+    /// Arguments are partially applied; this is the corresponding thunk.
+    Partial(T),
+}
+
 impl RedState {
     pub fn neutr(&self) -> Self {
         match *self {
@@ -90,15 +161,6 @@ impl RedState {
             RedState::Cstr => RedState::Red,
         }
     }
-}
-
-/// type of shared terms. fconstr and frterm are mutually recursive.
-/// Clone of the constr structure, but completely mutable, and
-/// annotated with reduction state (reducible or not).
-#[derive(Clone,Debug)]
-pub struct FConstr<'a, 'b> where 'b: 'a {
-    norm: Cell<RedState>,
-    term: Cell<Option<&'a FTerm<'a, 'b>>>,
 }
 
 impl<'a, 'b> FConstr<'a, 'b> {
@@ -116,7 +178,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
         self.term.set(term);
     }
 
-    pub fn lft(&self, mut n: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
+    fn lft(&self, mut n: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
         let mut ft = self;
         loop {
             match *ft.fterm().expect("Tried to lift a locked term") {
@@ -165,7 +227,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
     }
 
     /// Lifting specialized to the case where n = 0.
-    pub fn lft0(&self, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
+    fn lft0(&self, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
         match *self.fterm().expect("Tried to lift a locked term") {
             FTerm::Ind(_) | FTerm::Construct(_)
             | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => Ok(self.clone()),
@@ -187,6 +249,12 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr>
         where F: Fn(&FConstr<'a, 'b>, &Lift, &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr>,
     {
+        // FIXME: The constant cloning of lfts can likely be replaced by a slightly different API
+        // where lfts is taken mutably, and added shifts or lifts can be pushed for a scope, then
+        // popped automatically.  There are several cute ways to do this (including a wrapper
+        // around a lift with a custom destructor, and using a closure).  The destructor route is
+        // somewhat appealing because it probably makes it easier to convert this into something
+        // that doesn't require mutual recursion.
         /* let mut norm_ = self.norm.get();
         let mut term_ = Cow::Borrowed(self.fterm().expect("Tried to lift a locked term!"));*/
         let mut lfts = Cow::Borrowed(lfts);
@@ -346,7 +414,6 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     // clone here.  This optimization may also apply for other FTerms but Lambda is
                     // the most obvious, since dest_flambda only needs to slice into the array (of
                     // course, because of this maybe dest_flambda isn't even needed here).
-                    let mut tys = tys.clone(); // expensive
                     let (na, ty, bd) =
                         FTerm::dest_flambda(Subs::mk_clos2, tys, b, e, ctx)?;
                     let ty = constr_fun(&ty, &lfts, ctx)?;
@@ -380,6 +447,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                 },
                 // | FEvar (ev,args) -> Evar(ev,Array.map (constr_fun lfts) args)
                 FTerm::Lift(k, ref a) => {
+                    // expensive
                     let mut lfts_ = lfts.into_owned();
                     lfts_.shift(k)?;
                     lfts = Cow::Owned(lfts_);
@@ -398,10 +466,80 @@ impl<'a, 'b> FConstr<'a, 'b> {
             }
         }
     }
+
+    fn zip(&self, stk: &mut Stack<'a, 'b>,
+           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+        let mut m = Cow::Borrowed(self);
+        while let Some(s) = stk.pop() {
+            match s {
+                StackMember::App(args) => {
+                    let norm = m.norm.get().neutr();
+                    let t = FTerm::App(m.into_owned(), args);
+                    m = Cow::Owned(FConstr {
+                        norm: Cell::new(norm),
+                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                    });
+                },
+                StackMember::Case(o, p, br) => {
+                    let norm = m.norm.get().neutr();
+                    let t = FTerm::Case(o, p, m.into_owned(), br);
+                    m = Cow::Owned(FConstr {
+                        norm: Cell::new(norm),
+                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                    });
+                },
+                StackMember::CaseT(o, e) => {
+                    let norm = m.norm.get().neutr();
+                    let t = FTerm::CaseT(o, m.into_owned(), e);
+                    m = Cow::Owned(FConstr {
+                        norm: Cell::new(norm),
+                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                    });
+                },
+                StackMember::Proj(_, _, o) => {
+                    let norm = m.norm.get().neutr();
+                    let t = FTerm::Proj(o, m.into_owned());
+                    m = Cow::Owned(FConstr {
+                        norm: Cell::new(norm),
+                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                    });
+                },
+                StackMember::Fix(fx, mut par) => {
+                    // FIXME: This seems like a very weird and convoluted way to do this.
+                    let mut v = vec![m.into_owned()];
+                    m = Cow::Owned(fx);
+                    stk.append(v)?;
+                    // mem::swap(stk, &mut par);
+                    // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
+                    // actually at the end of the Vec.  Therefore, where in the OCaml we perform
+                    // par @ stk, here we have reversed par and reversed stk, and perform
+                    // stk ++ par (or kst ++ rap).
+                    stk.extend(par.0.into_iter());
+                },
+                StackMember::Shift(n) => {
+                    m = Cow::Owned(m.lft(n, ctx)?);
+                },
+                StackMember::Update(rf) => {
+                    rf.update(m.norm.get(), m.term.get());
+                    // TODO: The below is closer to the OCaml implementation, but it doesn't seem
+                    // like there's any point in doing it, since we never update m anyway (we do
+                    // return it at the end, but we're currently returning an owned FTerm rather
+                    // than a shared reference).
+                    // m = Cow::Borrowed(rf);
+                },
+            }
+        }
+        Ok(m.into_owned())
+    }
+
+    pub fn fapp_stack(&self, stk: &mut Stack<'a, 'b>,
+                      ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+        self.zip(stk, ctx)
+    }
 }
 
 impl<'a, 'b> Subs<FConstr<'a, 'b>> {
-    pub fn clos_rel(&self, i: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+    fn clos_rel(&self, i: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
         match self.expand_rel(i)? {
             (n, Expr::Val(mt)) => mt.lft(n, ctx),
             (k, Expr::Var(None)) => Ok(FConstr {
@@ -429,9 +567,9 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
         }
     }
 
-    pub fn mk_lambda(self,
-                     /*t: ORef<(Name, Constr, Constr)>*/
-                     t: &'b Constr) -> IdxResult<FTerm<'a, 'b>> {
+    fn mk_lambda(self,
+                 /*t: ORef<(Name, Constr, Constr)>*/
+                 t: &'b Constr) -> IdxResult<FTerm<'a, 'b>> {
         // let t = Constr::Lambda(t);
         let (mut rvars, t_) = t.decompose_lam(); // expensive because it allocates a new vector.
         // We know rvars.len() is nonzero.
@@ -615,56 +753,6 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     }
 }
 
-#[derive(Clone,Debug)]
-pub enum FTerm<'a, 'b> where 'b: 'a {
-  Rel(Idx),
-  /// Metas and sorts; but metas shouldn't occur in a .vo...
-  Atom(&'b Constr),
-  Cast(FConstr<'a, 'b>, MRef<'b, (Constr, Cast, Constr)>, FConstr<'a, 'b>),
-  Flex(TableKeyC<'b>),
-  Ind(MRef<'b, PUniverses<Ind>>),
-  Construct(MRef<'b, PUniverses<Cons>>),
-  App(FConstr<'a, 'b>, Vec<FConstr<'a, 'b>>),
-  Proj(MRef<'b, (Proj, Constr)>, FConstr<'a, 'b>),
-  Fix(MRef<'b, Fix>, Subs<FConstr<'a, 'b>>),
-  CoFix(MRef<'b, CoFix>, Subs<FConstr<'a, 'b>>),
-  Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>, FConstr<'a, 'b>,
-       Vec<FConstr<'a, 'b>>),
-  /// predicate and branches are closures
-  CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
-        Subs<FConstr<'a, 'b>>),
-  Lambda(Vec</*(Name, Constr)*/MRef<'b, (Name, Constr, Constr)>>,
-         &'b Constr, Subs<FConstr<'a, 'b>>),
-  Prod(MRef<'b, (Name, Constr, Constr)>, FConstr<'a, 'b>, FConstr<'a, 'b>),
-  LetIn(MRef<'b, (Name, Constr, Constr, Constr)>,
-        FConstr<'a, 'b>, FConstr<'a, 'b>, Subs<FConstr<'a, 'b>>),
-  // should not occur
-  // | FEvar of existential_key * fconstr array (* why diff from kernel/closure? *)
-  /// FLIFT is a delayed shift; allows sharing between 2 lifted copies
-  /// of a given term.
-  Lift(Idx, FConstr<'a, 'b>),
-  /// FCLOS is a delayed substitution applied to a constr
-  Clos(&'b Constr, Subs<FConstr<'a, 'b>>),
-  // /// FLOCKED is used to erase the content of a reference that must
-  // /// be updated. This is to allow the garbage collector to work
-  // /// before the term is computed.
-  // Locked,
-}
-
-/// The type of (machine) stacks (= lambda-bar-calculus' contexts)
-pub enum StackMember<'a, 'b> where 'b: 'a {
-    App(Vec<FConstr<'a, 'b>>),
-    Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
-         Vec<FConstr<'a, 'b>>),
-    CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>),
-    Proj(Idx, Idx, ORef<(Proj, Constr)>),
-    Fix(FConstr<'a, 'b>, Stack<'a, 'b>),
-    Shift(Idx),
-    Update(FConstr<'a, 'b>),
-}
-
-pub struct Stack<'a, 'b>(Vec<StackMember<'a, 'b>>) where 'b: 'a;
-
 impl<'a, 'b> ::std::ops::Deref for Stack<'a, 'b> {
     type Target = Vec<StackMember<'a, 'b>>;
     fn deref(&self) -> &Vec<StackMember<'a, 'b>> {
@@ -683,12 +771,14 @@ impl<'a, 'b> Stack<'a, 'b> {
         self.0.push(o);
         Ok(())
     }
-    pub fn append(&mut self, s: Vec<FConstr<'a, 'b>>) -> IdxResult<()> {
+    pub fn append(&mut self, mut v: Vec<FConstr<'a, 'b>>) -> IdxResult<()> {
+        if v.len() == 0 { return Ok(()) }
         if let Some(&mut StackMember::App(ref mut l)) = self.last_mut() {
-            l.extend(s.into_iter());
+            mem::swap(&mut v, l);
+            l.extend(v.into_iter());
             return Ok(())
         }
-        self.push(StackMember::App(s))
+        self.push(StackMember::App(v))
     }
 
     pub fn shift(&mut self, n: Idx) -> IdxResult<()> {
@@ -712,7 +802,7 @@ impl<'a, 'b> Stack<'a, 'b> {
                         Some(depth) => Some(depth.checked_add(k)?),
                     };
                 },
-                StackMember::Update(ref m) => {
+                StackMember::Update(m) => {
                     // Be sure to create a new cell otherwise sharing would be
                     // lost by the update operation.
                     // FIXME: Figure out what the above cryptic comment means and whether it
@@ -737,7 +827,7 @@ impl<'a, 'b> Stack<'a, 'b> {
     }
 
     /// Put an update mark in the stack, only if needed
-    pub fn update(&mut self, m: FConstr<'a, 'b>,
+    pub fn update(&mut self, m: &'a FConstr<'a, 'b>,
                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
         if m.norm.get() == RedState::Red {
             // const LOCKED: &'static FTerm<'static> = &FTerm::Locked;
@@ -746,12 +836,212 @@ impl<'a, 'b> Stack<'a, 'b> {
             self.push(StackMember::Update(m))
         } else { Ok(()) }
     }
+
+    /// The assertions in the functions below are granted because they are
+    /// called only when m is a constructor, a cofix
+    /// (strip_update_shift_app), a fix (get_nth_arg) or an abstraction
+    /// (strip_update_shift, through get_arg).
+
+    /// optimized for the case where there are no shifts...
+    fn strip_update_shift_app(&mut self, mut head: FConstr<'a, 'b>,
+                              ctx: &'a Context<FTerm<'a, 'b>>) ->
+                              IdxResult<((Option<Idx>, Stack<'a, 'b>))> {
+        // FIXME: This could almost certainly be made more efficient using slices (for example) or
+        // custom iterators.
+        assert!(head.norm.get() != RedState::Red);
+        let mut rstk = Stack(Vec::new());
+        let mut depth = None;
+        while let Some(shead) = self.pop() {
+            match shead {
+                StackMember::Shift(k) => {
+                    rstk.push(shead)?;
+                    head = head.lft(k, ctx)?;
+                    depth = match depth {
+                        None => Some(k),
+                        Some(depth) => Some(depth.checked_add(k)?),
+                    };
+                },
+                StackMember::App(args) => {
+                    rstk.push(StackMember::App(args.clone() /* expensive */))?;
+                    let h = head.clone();
+                    head.term = Cell::new(Some(ctx.term_arena.alloc(FTerm::App(h, args))));
+                },
+                StackMember::Update(m) => {
+                    m.update(head.norm.get(), head.term.get());
+                    // NOTE: In the OCaml implementation this might be worthwhile, but I'm not sure
+                    // about this one since head is never (AFAICT?) able to be made into a shared
+                    // reference before the function returns.
+                    // head = m;
+                },
+                s => {
+                    // It was fine on the stack before, so it should be fine now.
+                    self.0.push(s);
+                    break
+                }
+            }
+        }
+        // FIXME: Seriously, slices have to be better than this.
+        // Getting rid of update marks in the stack is nice, but if by avoiding them we
+        // can avoid a bunch of allocation, it's probably a win... and we might be able
+        // to create an iterator that just skips over the updates, or something.
+        rstk.reverse();
+        Ok((depth, rstk))
+    }
+
+    fn get_nth_arg(&mut self, mut head: FConstr<'a, 'b>, mut n: usize,
+                   ctx: &'a Context<FTerm<'a, 'b>>) ->
+                   IdxResult<Option<(Stack<'a, 'b>, FConstr<'a, 'b>)>> {
+        // FIXME: This could almost certainly be made more efficient using slices (for example) or
+        // custom iterators.
+        assert!(head.norm.get() != RedState::Red);
+        let mut rstk = Stack(Vec::new());
+        while let Some(shead) = self.pop() {
+            match shead {
+                StackMember::Shift(k) => {
+                    rstk.push(shead)?;
+                    head = head.lft(k, ctx)?;
+                },
+                StackMember::App(args) => {
+                    let q = args.len();
+                    if n >= q {
+                        // TODO: Check to see if args.len() could ever be zero?  If not, should we
+                        // assert here, given that we check below to make sure we don't push onto
+                        // rstk if n = 0?  Otherwise, should we add similar logic to the below to
+                        // avoid pushing an empty arg stack?
+                        rstk.push(StackMember::App(args.clone() /* expensive */))?;
+                        let h = head.clone();
+                        head.term = Cell::new(Some(ctx.term_arena.alloc(FTerm::App(h, args))));
+                        // Safe because n >= q
+                        n -= q;
+                    } else {
+                        // FIXME: Make this all use the proper vector methods (draining etc.).
+                        // Safe because n ≤ args.len() (actually < args.len())
+                        let bef = args[..n].to_vec(); // expensive
+                        // Safe because n < args.len()
+                        let arg = args[n].clone();
+                        // Safe because (1) n + 1 is in bounds for usize, and
+                        // (2) n + 1 ≤ args.len()
+                        let aft = args[n+1..].to_vec(); // expensive
+                        // n = bef.len()
+                        if n > 0 {
+                            rstk.push(StackMember::App(bef))?;
+                        }
+                        rstk.reverse();
+                        self.append(aft)?;
+                        return Ok(Some((rstk, arg)))
+                    }
+                },
+                StackMember::Update(m) => {
+                    m.update(head.norm.get(), head.term.get());
+                    // NOTE: In the OCaml implementation this might be worthwhile, but I'm not sure
+                    // about this one since head is never (AFAICT?) able to be made into a shared
+                    // reference before the function returns.
+                    // head = m;
+                },
+                s => {
+                    // It was fine on the stack before, so it should be fine now.
+                    self.0.push(s);
+                    break
+                }
+            }
+        }
+        // FIXME: Seriously, slices have to be better than this.
+        // Getting rid of update marks in the stack is nice, but if by avoiding them we
+        // can avoid a bunch of allocation, it's probably a win... and we might be able
+        // to create an iterator that just skips over the updates, or something.
+        rstk.reverse();
+        self.extend(rstk.0.into_iter());
+        Ok(None)
+    }
+
+    /// Beta reduction: look for an applied argument in the stack.
+    /// Since the encountered update marks are removed, h must be a whnf
+    /// tys, f, and e must be from a valid FTerm (e.g. tys.len() must be nonzero).
+    fn get_args(&mut self,
+                mut tys: &[MRef<'b, (Name, Constr, Constr)>],
+                f: &'b Constr,
+                mut e: Subs<FConstr<'a, 'b>>,
+                ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Application<FConstr<'a, 'b>>> {
+        while let Some(shead) = self.pop() {
+            match shead {
+                StackMember::Update(r) => {
+                    // FIXME: If we made FLambdas point into slices, this silly allocation would
+                    // not be necessary.
+                    // Also: note that if tys.len() = 0, we will get an assertion later trying to
+                    // convert it back.  The loop, however, should preserve tys.len() > 0 as long
+                    // as it was initially > 0.
+                    let tys = tys.to_vec(); // expensive
+                    let e = e.clone(); // expensive
+                    r.update(RedState::Cstr,
+                             Some(ctx.term_arena.alloc(FTerm::Lambda(tys, f, e))));
+                },
+                StackMember::Shift(k) => {
+                    e.shift(k)?;
+                },
+                StackMember::App(l) => {
+                    let n = tys.len();
+                    let na = l.len();
+                    if n == na {
+                        // All arguments have been applied
+                        e.cons(l)?;
+                        return Ok(Application::Full(e))
+                    } else if n < na {
+                        // More arguments
+                        // FIXME: If we made FLambdas point into slices, these silly allocations
+                        // would not be necessary.
+                        // Safe because n ≤ l.len()
+                        let args = l[..n].to_vec(); // expensive
+                        e.cons(args)?;
+                        // Safe because n ≤ na ≤ l.len() (n < na, actually, so eargs will be
+                        // nonempty).
+                        let eargs = l[n..na].to_vec(); // expensive
+                        self.push(StackMember::App(eargs))?;
+                        return Ok(Application::Full(e))
+                    } else {
+                        // More lambdas
+                        // Safe because na ≤ tys.len() (na < tys.len(), actually, so tys will
+                        // still be nonempty).
+                        tys = &tys[na..];
+                        e.cons(l)?;
+                    }
+                },
+                s => {
+                    // It was fine on the stack before, so it should be fine now.
+                    self.0.push(s);
+                    break
+                }
+            }
+        }
+        let tys = tys.to_vec(); // expensive
+        Ok(Application::Partial(FConstr {
+            norm: Cell::new(RedState::Cstr),
+            term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Lambda(tys, f, e)))),
+        }))
+    }
+
+    /// Eta expansion: add a reference to implicit surrounding lambda at end of stack
+    pub fn eta_expand_stack(&mut self, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+        // FIXME: Given that we want to do this, seriously consider using a VecDeque rather than a
+        // stack.  That would make this operation O(1).  The only potential downside would be less
+        // easy slicing, but that might not matter too much if we do things correctly (as_slices is
+        // quite handy).
+        self.reverse();
+        // This allocates a Vec, but it's not really that expensive.
+        let app = vec![FConstr {
+            norm: Cell::new(RedState::Norm),
+            term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(Idx::ONE)))),
+        }];
+        self.push(StackMember::App(app))?;
+        self.push(StackMember::Shift(Idx::ONE))?;
+        self.reverse();
+        Ok(())
+    }
 }
 
 impl<'a, 'b> FTerm<'a, 'b> {
     /// Do not call this function unless tys.len() ≥ 1.
     pub fn dest_flambda<F>(clos_fun: F,
-                           mut tys: Vec</*(Name, Constr)*/MRef<'b, (Name, Constr, Constr)>>,
+                           tys: &[MRef<'b, (Name, Constr, Constr)>],
                            b: &'b Constr,
                            e: &Subs<FConstr<'a, 'b>>,
                            ctx: &'a Context<FTerm<'a, 'b>>) ->
@@ -760,8 +1050,13 @@ impl<'a, 'b> FTerm<'a, 'b> {
                     &'b Constr, &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>,
     {
         // FIXME: consider using references to slices for FTerm::Lambda arguments instead of Vecs.
-        // That would allow us to avoid taking tys by value.  However, this might not matter if it
+        // That would allow us to avoid cloning tys here.  However, this might not matter if it
         // turns out the uses of dest_flambda are inherently wasteful.
+        // UPDATE: It turns out get_args would also probably benefit from FTerm::Lambda using
+        // slices or pointers.
+        // FIXME: If we do for some reason stick with vectors, no need to convert and then pop...
+        // can just convert the slice.  Might make a vector size difference, if nothing else.
+        let mut tys = tys.to_vec(); // expensive
         let o = tys.pop().expect("Should not call dest_flambda with tys.len() = 0");
         let (ref na, ref ty, _) = **o;
         let ty = clos_fun(e, ty, ctx)?;

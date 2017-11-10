@@ -60,6 +60,8 @@ impl Idx {
         }
     }
 
+    pub const ONE : Self = Idx(1);
+
     pub fn checked_add(self, o: Idx) -> IdxResult<Idx> {
         // Must be positive since both Idxs are positive.
         Ok(Idx(self.0.checked_add(o.0)?))
