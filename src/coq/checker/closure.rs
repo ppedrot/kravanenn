@@ -128,21 +128,35 @@ pub enum FTerm<'a, 'b> where 'b: 'a {
 }
 
 /// The type of (machine) stacks (= lambda-bar-calculus' contexts)
-pub enum StackMember<'a, 'b> where 'b: 'a {
+/// Inst ≡ ! allows us to type-safely represent stacks which have no instructions;
+/// Shift ≡ ! allows us to type-safely represent stacks which have no shifts.
+/// Inst ≡ ! and Shift ≡ ! means the stack is purely applicative.
+/// (NOTE: This might become harder if / when we move away from Vecs, so it's a bit risky to add
+/// this at this stage).
+pub enum StackMember<'a, 'b, Inst, Shft> where 'b: 'a {
     App(Vec<FConstr<'a, 'b>>),
     Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
-         Vec<FConstr<'a, 'b>>),
-    CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>),
-    Proj(Idx, Idx, MRef<'b, (Proj, Constr)>),
-    Fix(FConstr<'a, 'b>, Stack<'a, 'b>),
-    Shift(Idx),
-    Update(&'a FConstr<'a, 'b>),
+         Vec<FConstr<'a, 'b>>, Inst),
+    CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>, Inst),
+    Proj(Idx, Idx, MRef<'b, (Proj, Constr)>, Inst),
+    Fix(FConstr<'a, 'b>, Stack<'a, 'b, Inst, Shft>, Inst),
+    Shift(Idx, Shft),
+    Update(&'a FConstr<'a, 'b>, Inst),
 }
 
 /// A [stack] is a context of arguments, arguments are pushed by
 /// [append_stack] one array at a time but popped with [decomp_stack]
 /// one by one
-pub struct Stack<'a, 'b>(Vec<StackMember<'a, 'b>>) where 'b: 'a;
+pub struct Stack<'a, 'b, Inst, Shft>(Vec<StackMember<'a, 'b, Inst, Shft>>) where 'b: 'a;
+
+/// Full stack (all operations are allowed).
+pub type FStack<'a, 'b> = Stack<'a, 'b, (), ()>;
+
+/// Purely applicative stack (only Apps are allowed).
+pub type AStack<'a, 'b> = Stack<'a, 'b, !, !>;
+
+/// Applicative + shifts (only Shift and App are allowed).
+pub type SStack<'a, 'b> = Stack<'a, 'b, !, ()>;
 
 /// The result of trying to perform beta reduction.
 enum Application<T> {
@@ -467,7 +481,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
         }
     }
 
-    fn zip(&self, stk: &mut Stack<'a, 'b>,
+    fn zip<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
            ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
         let mut m = Cow::Borrowed(self);
         while let Some(s) = stk.pop() {
@@ -480,7 +494,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         term: Cell::new(Some(ctx.term_arena.alloc(t))),
                     });
                 },
-                StackMember::Case(o, p, br) => {
+                StackMember::Case(o, p, br, _) => {
                     let norm = m.norm.get().neutr();
                     let t = FTerm::Case(o, p, m.into_owned(), br);
                     m = Cow::Owned(FConstr {
@@ -488,7 +502,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         term: Cell::new(Some(ctx.term_arena.alloc(t))),
                     });
                 },
-                StackMember::CaseT(o, e) => {
+                StackMember::CaseT(o, e, _) => {
                     let norm = m.norm.get().neutr();
                     let t = FTerm::CaseT(o, m.into_owned(), e);
                     m = Cow::Owned(FConstr {
@@ -496,7 +510,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         term: Cell::new(Some(ctx.term_arena.alloc(t))),
                     });
                 },
-                StackMember::Proj(_, _, o) => {
+                StackMember::Proj(_, _, o, _) => {
                     let norm = m.norm.get().neutr();
                     let t = FTerm::Proj(o, m.into_owned());
                     m = Cow::Owned(FConstr {
@@ -504,7 +518,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         term: Cell::new(Some(ctx.term_arena.alloc(t))),
                     });
                 },
-                StackMember::Fix(fx, mut par) => {
+                StackMember::Fix(fx, mut par, _) => {
                     // FIXME: This seems like a very weird and convoluted way to do this.
                     let mut v = vec![m.into_owned()];
                     m = Cow::Owned(fx);
@@ -516,10 +530,10 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     // stk ++ par (or kst ++ rap).
                     stk.extend(par.0.into_iter());
                 },
-                StackMember::Shift(n) => {
+                StackMember::Shift(n, _) => {
                     m = Cow::Owned(m.lft(n, ctx)?);
                 },
-                StackMember::Update(rf) => {
+                StackMember::Update(rf, _) => {
                     rf.update(m.norm.get(), m.term.get());
                     // TODO: The below is closer to the OCaml implementation, but it doesn't seem
                     // like there's any point in doing it, since we never update m anyway (we do
@@ -532,8 +546,8 @@ impl<'a, 'b> FConstr<'a, 'b> {
         Ok(m.into_owned())
     }
 
-    pub fn fapp_stack(&self, stk: &mut Stack<'a, 'b>,
-                      ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+    pub fn fapp_stack<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
+                            ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
         self.zip(stk, ctx)
     }
 }
@@ -753,24 +767,25 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     }
 }
 
-impl<'a, 'b> ::std::ops::Deref for Stack<'a, 'b> {
-    type Target = Vec<StackMember<'a, 'b>>;
-    fn deref(&self) -> &Vec<StackMember<'a, 'b>> {
+impl<'a, 'b, I, S> ::std::ops::Deref for Stack<'a, 'b, I, S> {
+    type Target = Vec<StackMember<'a, 'b, I, S>>;
+    fn deref(&self) -> &Vec<StackMember<'a, 'b, I, S>> {
         &self.0
     }
 }
 
-impl<'a, 'b> ::std::ops::DerefMut for Stack<'a, 'b> {
-    fn deref_mut(&mut self) -> &mut Vec<StackMember<'a, 'b>> {
+impl<'a, 'b, I, S> ::std::ops::DerefMut for Stack<'a, 'b, I, S> {
+    fn deref_mut(&mut self) -> &mut Vec<StackMember<'a, 'b, I, S>> {
         &mut self.0
     }
 }
 
-impl<'a, 'b> Stack<'a, 'b> {
-    fn push(&mut self, o: StackMember<'a, 'b>) -> IdxResult<()> {
+impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
+    fn push(&mut self, o: StackMember<'a, 'b, I, S>) -> IdxResult<()> {
         self.0.push(o);
         Ok(())
     }
+
     pub fn append(&mut self, mut v: Vec<FConstr<'a, 'b>>) -> IdxResult<()> {
         if v.len() == 0 { return Ok(()) }
         if let Some(&mut StackMember::App(ref mut l)) = self.last_mut() {
@@ -781,12 +796,12 @@ impl<'a, 'b> Stack<'a, 'b> {
         self.push(StackMember::App(v))
     }
 
-    pub fn shift(&mut self, n: Idx) -> IdxResult<()> {
-        if let Some(&mut StackMember::Shift(ref mut k)) = self.last_mut() {
+    pub fn shift(&mut self, n: Idx, s: S) -> IdxResult<()> {
+        if let Some(&mut StackMember::Shift(ref mut k, _)) = self.last_mut() {
             *k = k.checked_add(n)?;
             return Ok(())
         }
-        self.push(StackMember::Shift(n))
+        self.push(StackMember::Shift(n, s))
     }
 
     // since the head may be reducible, we might introduce lifts of 0
@@ -796,19 +811,19 @@ impl<'a, 'b> Stack<'a, 'b> {
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
-                StackMember::Shift(k) => {
+                StackMember::Shift(k, s) => {
                     depth = match depth {
-                        None => Some(k),
-                        Some(depth) => Some(depth.checked_add(k)?),
+                        None => Some((k, s)),
+                        Some((depth, s)) => Some((depth.checked_add(k)?, s)),
                     };
                 },
-                StackMember::Update(m) => {
+                StackMember::Update(m, _) => {
                     // Be sure to create a new cell otherwise sharing would be
                     // lost by the update operation.
                     // FIXME: Figure out what the above cryptic comment means and whether it
                     // applies to Rust.
                     let h_ = match depth {
-                        Some(depth) => head.lft(depth, ctx),
+                        Some((depth, _)) => head.lft(depth, ctx),
                         None => head.lft0(ctx),
                     }?;
                     m.update(h_.norm.get(), h_.term.get());
@@ -817,7 +832,7 @@ impl<'a, 'b> Stack<'a, 'b> {
                     // It was fine on the stack before, so it should be fine now.
                     self.0.push(s);
                     return match depth {
-                        Some(depth) => self.shift(depth),
+                        Some((depth, s)) => self.shift(depth, s),
                         None => Ok(()),
                     }
                 }
@@ -827,13 +842,13 @@ impl<'a, 'b> Stack<'a, 'b> {
     }
 
     /// Put an update mark in the stack, only if needed
-    pub fn update(&mut self, m: &'a FConstr<'a, 'b>,
+    pub fn update(&mut self, i: I, m: &'a FConstr<'a, 'b>,
                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
         if m.norm.get() == RedState::Red {
             // const LOCKED: &'static FTerm<'static> = &FTerm::Locked;
             self.compact(&m, ctx)?;
             m.term.set(None);
-            self.push(StackMember::Update(m))
+            self.push(StackMember::Update(m, i))
         } else { Ok(()) }
     }
 
@@ -845,7 +860,7 @@ impl<'a, 'b> Stack<'a, 'b> {
     /// optimized for the case where there are no shifts...
     fn strip_update_shift_app(&mut self, mut head: FConstr<'a, 'b>,
                               ctx: &'a Context<FTerm<'a, 'b>>) ->
-                              IdxResult<((Option<Idx>, Stack<'a, 'b>))> {
+                              IdxResult<((Option<Idx>, Stack<'a, 'b, !, S>))> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
         assert!(head.norm.get() != RedState::Red);
@@ -853,8 +868,8 @@ impl<'a, 'b> Stack<'a, 'b> {
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
-                StackMember::Shift(k) => {
-                    rstk.push(shead)?;
+                StackMember::Shift(k, s) => {
+                    rstk.push(StackMember::Shift(k, s))?;
                     head = head.lft(k, ctx)?;
                     depth = match depth {
                         None => Some(k),
@@ -866,7 +881,7 @@ impl<'a, 'b> Stack<'a, 'b> {
                     let h = head.clone();
                     head.term = Cell::new(Some(ctx.term_arena.alloc(FTerm::App(h, args))));
                 },
-                StackMember::Update(m) => {
+                StackMember::Update(m, _) => {
                     m.update(head.norm.get(), head.term.get());
                     // NOTE: In the OCaml implementation this might be worthwhile, but I'm not sure
                     // about this one since head is never (AFAICT?) able to be made into a shared
@@ -890,15 +905,15 @@ impl<'a, 'b> Stack<'a, 'b> {
 
     fn get_nth_arg(&mut self, mut head: FConstr<'a, 'b>, mut n: usize,
                    ctx: &'a Context<FTerm<'a, 'b>>) ->
-                   IdxResult<Option<(Stack<'a, 'b>, FConstr<'a, 'b>)>> {
+                   IdxResult<Option<(Stack<'a, 'b, !, S>, FConstr<'a, 'b>)>> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
         assert!(head.norm.get() != RedState::Red);
         let mut rstk = Stack(Vec::new());
         while let Some(shead) = self.pop() {
             match shead {
-                StackMember::Shift(k) => {
-                    rstk.push(shead)?;
+                StackMember::Shift(k, s) => {
+                    rstk.push(StackMember::Shift(k, s))?;
                     head = head.lft(k, ctx)?;
                 },
                 StackMember::App(args) => {
@@ -931,7 +946,7 @@ impl<'a, 'b> Stack<'a, 'b> {
                         return Ok(Some((rstk, arg)))
                     }
                 },
-                StackMember::Update(m) => {
+                StackMember::Update(m, _) => {
                     m.update(head.norm.get(), head.term.get());
                     // NOTE: In the OCaml implementation this might be worthwhile, but I'm not sure
                     // about this one since head is never (AFAICT?) able to be made into a shared
@@ -950,7 +965,10 @@ impl<'a, 'b> Stack<'a, 'b> {
         // can avoid a bunch of allocation, it's probably a win... and we might be able
         // to create an iterator that just skips over the updates, or something.
         rstk.reverse();
-        self.extend(rstk.0.into_iter());
+        self.extend(rstk.0.into_iter().map( |v| match v {
+            StackMember::Shift(k, s) => StackMember::Shift(k, s),
+            StackMember::App(args) => StackMember::App(args),
+        }));
         Ok(None)
     }
 
@@ -964,7 +982,7 @@ impl<'a, 'b> Stack<'a, 'b> {
                 ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Application<FConstr<'a, 'b>>> {
         while let Some(shead) = self.pop() {
             match shead {
-                StackMember::Update(r) => {
+                StackMember::Update(r, _) => {
                     // FIXME: If we made FLambdas point into slices, this silly allocation would
                     // not be necessary.
                     // Also: note that if tys.len() = 0, we will get an assertion later trying to
@@ -975,7 +993,7 @@ impl<'a, 'b> Stack<'a, 'b> {
                     r.update(RedState::Cstr,
                              Some(ctx.term_arena.alloc(FTerm::Lambda(tys, f, e))));
                 },
-                StackMember::Shift(k) => {
+                StackMember::Shift(k, _) => {
                     e.shift(k)?;
                 },
                 StackMember::App(l) => {
@@ -1019,6 +1037,9 @@ impl<'a, 'b> Stack<'a, 'b> {
         }))
     }
 
+}
+
+impl<'a, 'b, I> Stack<'a, 'b, I, ()> {
     /// Eta expansion: add a reference to implicit surrounding lambda at end of stack
     pub fn eta_expand_stack(&mut self, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
         // FIXME: Given that we want to do this, seriously consider using a VecDeque rather than a
@@ -1032,9 +1053,122 @@ impl<'a, 'b> Stack<'a, 'b> {
             term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(Idx::ONE)))),
         }];
         self.push(StackMember::App(app))?;
-        self.push(StackMember::Shift(Idx::ONE))?;
+        self.push(StackMember::Shift(Idx::ONE, ()))?;
         self.reverse();
         Ok(())
+    }
+}
+
+impl<'a, 'b, S> Stack<'a, 'b, !, S> {
+    /// Iota reduction: extract the arguments to be passed to the Case
+    /// branches
+    /// Stacks on which this is called must satisfy:
+    /// - stack is composed exclusively of Apps and Shifts.
+    /// - depth = sum of shifts in this stack.
+    fn reloc_rargs(&mut self, depth: Option<Idx>,
+                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+        let mut depth = if let Some(depth) = depth { depth } else { return Ok(()) };
+        let done = Cell::new(None);
+        // We wastefully drop the shifts.
+        let iter = self.drain_filter( |shead| {
+            if done.get().is_some() { return false }
+            match *shead {
+                StackMember::App(ref mut args) => {
+                    for arg in args.iter_mut() {
+                        match arg.lft(depth, ctx) {
+                            Ok(h) => { *arg = h },
+                            Err(e) => {
+                                done.set(Some(Err(e)));
+                                // Note that args before this are partially lifted!
+                                // Can't rely on the state of the stack in the case of an
+                                // error.
+                                break
+                            },
+                        }
+                    }
+                    // Retain the lifted ZApp
+                    return false
+                },
+                StackMember::Shift(k, _) => {
+                    const ERR_STRING : &'static str =
+                        "reloc_rargs should always be called with depth = sum of shifts";
+                    // The below assertion is granted because reloc_args is generally called on
+                    // stacks produced by strip_update_shift_app, which (1) only have shifts and
+                    // apps in them, and (2) always have depth = sum of shifts.  The only
+                    // modification made to these stacks before calling reloc_rargs is by
+                    // try_drop_parameters, which only adds new apps, not shifts (it calls
+                    // append_stack).  Since the sum of shifts is equal to the depth, subtracting
+                    // k from the depth should be non-negative.
+                    if let Some(depth_) = depth.checked_sub(k).expect(ERR_STRING) {
+                        // k < depth
+                        depth = depth_;
+                    } else {
+                        // k = depth; end the loop.
+                        done.set(Some(Ok(())));
+                    }
+                    // Drop the shift.
+                    return true
+                },
+            }
+        });
+        // Execute the iterator for its side effects.
+        for _ in iter {}
+        done.get().unwrap_or(Ok(()))
+    }
+
+    /// Only call with a stack and depth produced by strip_update_shift_app.
+    /// (strip_update_shift_app produces a stack with only Zapp and Zshift items, and depth = sum
+    /// of shifts in the stack).
+    fn try_drop_parameters(&mut self, mut depth: Option<Idx>, mut n: usize,
+                           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Result<(), ()>> {
+        // Drop should only succeed here if n == 0 (i.e. there were no additional parameters to
+        // drop).  But we should never reach the end of the while loop unless there was no
+        // StackMember::App in the stack, because if n = 0, ∀ q : usize, n ≤ q, which would
+        // mean the App branches returned.  Since we don't actually *do* anything in the Shift
+        // branch other than decrement depth, it doesn't affect whether n == 0 at the end, so we
+        // can just check it at the beginning.
+        if n == 0 { return Ok(Ok(())) }
+        while let Some(shead) = self.pop() {
+            match shead {
+                StackMember::App(args) => {
+                    let q = args.len();
+                    if n > q {
+                        // Safe because n > q → n - q > 0.
+                        n -= q;
+                    } else {
+                        if n < q {
+                            // Safe because n ≤ args.len (n < args.len(), actually, so aft will
+                            // be nonempty).
+                            // FIXME: If we made FLambdas point into slices, this silly allocation
+                            // would not be necessary (note to self: is this actually true?).
+                            let aft = args[n..].to_vec(); // expensive
+                            self.append(aft)?;
+                        }
+                        self.reloc_rargs(depth, ctx)?;
+                        return Ok(Ok(()));
+                    }
+                },
+                StackMember::Shift(k, _) => {
+                    const ERR_STRING : &'static str =
+                        "try_drop_parameters should always be called with depth = sum of shifts";
+                    // The below assertions are granted because reloc_args is necessarily called on
+                    // stacks produced by strip_update_shift_app, which (1) only have shifts and
+                    // apps in them, and (2) always have depth = sum of shifts.
+                    depth = depth.expect(ERR_STRING).checked_sub(k).expect(ERR_STRING);
+                },
+            }
+        }
+        // We exhausted the argument stack before we finished dropping all the parameters.
+        return Ok(Err(()))
+    }
+
+    /// Only call this on type-checked terms (otherwise the assertion may be false!)
+    /// FIXME: Figure out a way to usefully incorporate "this term has been typechecked" into
+    /// Rust's type system (maybe some sort of weird wrapper around Constr?).
+    fn drop_parameters(&mut self, depth: Option<Idx>, n: usize,
+                       ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+        Ok(self.try_drop_parameters(depth, n, ctx)?
+               .expect("We know n < stack_arg_size(self) if well-typed term"))
     }
 }
 

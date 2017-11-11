@@ -268,7 +268,7 @@ impl<'de, 'a> serde::Deserializer<'de> for Deserializer<'a>
         V: serde::de::Visitor<'de>,
     {
         /* println!("Deserializing enum: {}", self)*/;
-        println!("enum={}, variants={:?} size={:?}", _enum, variants, ::std::mem::size_of::<V::Value>());
+        /* println!("enum={}, variants={:?} size={:?}", _enum, variants, ::std::mem::size_of::<V::Value>()); */
         struct Enum<'a> {
             tag: u32,
             de: Deserializer<'a>,
@@ -424,7 +424,7 @@ impl<'de, 'a> serde::Deserializer<'de> for Deserializer<'a>
     where
         V: serde::de::Visitor<'de>,
     {
-        println!("Deserializing struct name={:?} fields={:?}: {:?} {} size={:?}", _name, fields, self.closure.0, self.closure, ::std::mem::size_of::<V::Value>());
+        /* println!("Deserializing struct name={:?} fields={:?}: {:?} {} size={:?}", _name, fields, self.closure.0, self.closure, ::std::mem::size_of::<V::Value>()); */
         let res = self.deserialize_tuple(fields.len(), visitor);
         if res.is_ok() { /* println!("Done deserializing struct name={:?} fields={:?}: {}", _name, fields, self)*/ };
         res
@@ -553,7 +553,7 @@ impl<'de, 's, T> serde::de::DeserializeState<'de, Seed<'s>> for ORef<T>
         // We set p only if this is field is a Ref and we are not already boxing this location
         let p = if let Field::Ref(p) = field { p as i64 } else { -1 };
         // println!("ORef: {:?}", p);
-        // Okay: we have the ptr, atm, or tag number... (fixme: make this work properly).
+        // Okay: we have the ptr, atm, or tag number... (FIXME: make this work properly).
         if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
             // Occupied entries have been visited before, so we just need to confirm that we have
             // the same time now that we did last time.
@@ -606,7 +606,7 @@ impl<'de, 's> serde::de::DeserializeState<'de, Seed<'s>> for Str
         // We set p only if this is field is a Ref and we are not already boxing this location
         let p = if let Field::Ref(p) = field { p as i64 } else { -1 };
         /* println!("SRef {:?}", p); */
-        // Okay: we have the ptr, atm, or tag number... (fixme: make this work properly).
+        // Okay: we have the ptr, atm, or tag number... (FIXME: make this work properly).
         if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
             // Occupied entries have been visited before, so we just need to confirm that we have
             // the same time now that we did last time.
@@ -677,7 +677,7 @@ impl<'de, 's> serde::de::DeserializeState<'de, Seed<'s>> for Str
         /* println!("SRef"); */
         let p = deserializer.deserialize_identifier(IdentVisitor)?;
         /* println!("SRef {:?}", p); */
-        // Okay: we have the ptr, atm, or tag number... (fixme: make this work properly).
+        // Okay: we have the ptr, atm, or tag number... (FIXME: make this work properly).
         if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
             // Occupied entries have been visited before, so we just need to confirm that we have
             // the same time now that we did last time.
@@ -747,7 +747,7 @@ impl<'s, 'de, T> serde::de::DeserializeState<'de, Seed<'s>> for Array<T>
         // We set p only if this is field is a Ref and we are not already boxing this location
         let p = if let Field::Ref(p) = field { p as i64 } else { -1 };
         /* println!("ARef {:?}", p); */
-        // Okay: we have the ptr, atm, or tag number... (fixme: make this work properly).
+        // Okay: we have the ptr, atm, or tag number... (FIXME: make this work properly).
         if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
             // Occupied entries have been visited before, so we just need to confirm that we have
             // the same time now that we did last time.
