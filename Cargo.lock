@@ -1,4 +1,9 @@
 [[package]]
+name = "bitflags"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "byteorder"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12,6 +17,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "kravanenn"
 version = "0.0.1"
 dependencies = [
+ "bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "byteorder 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "fixedbitset 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "light_arena 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -118,6 +124,7 @@ version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [metadata]
+"checksum bitflags 1.0.1 (registry+https://github.com/rust-lang/crates.io-index)" = "b3c30d3802dfb7281680d6285f2ccdaa8c2d8fee41f93805dba5c4cf50dc23cf"
 "checksum byteorder 0.5.3 (registry+https://github.com/rust-lang/crates.io-index)" = "0fc10e8cc6b2580fda3f36eb6dc5316657f812a3df879a44a66fc9f0fdbc4855"
 "checksum fixedbitset 0.1.8 (registry+https://github.com/rust-lang/crates.io-index)" = "85cb8fec437468d86dc7c83ca7cfc933341d561873275f22dd5eedefa63a6478"
 "checksum light_arena 0.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "a886ce2358566386500ec04e26a490e3033a5d8452747559bdaaa4955030bbc6"

@@ -1,5 +1,8 @@
-use std::cell::{Cell};
-use std::rc::{Rc};
+use coq::checker::environ::{Env, EnvError};
+use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, Lift, SubsV as Subs};
+use core::convert::{TryFrom};
+use core::nonzero::{NonZero};
+use ocaml::de::{Array, ORef};
 use ocaml::values::{
     CaseInfo,
     Cast,
@@ -17,14 +20,13 @@ use ocaml::values::{
     PUniverses,
     RecordBody,
 };
-use coq::checker::environ::{Env};
-use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, SubsV as Subs, Lift};
-use typed_arena::{Arena};
-use core::nonzero::NonZero;
-use core::convert::{TryFrom};
-use ocaml::de::{Array, ORef};
 use std::borrow::{Cow};
+use std::cell::{Cell};
+use std::collections::{HashMap};
 use std::mem;
+use std::option::{NoneError};
+use std::rc::{Rc};
+use typed_arena::{Arena};
 
 type MRef<'b, T> = &'b ORef<T>;
 
@@ -53,19 +55,62 @@ pub enum TableKey<T> {
 
 pub enum RedError {
     Idx(IdxError),
+    Env(EnvError),
     NotFound,
 }
 
-impl ::std::convert::From<IdxError> for RedError {
+impl ::std::convert::From<IdxError> for Box<RedError> {
     fn from(e: IdxError) -> Self {
-        RedError::Idx(e)
+        Box::new(RedError::Idx(e))
     }
 }
 
-pub type RedResult<T> = Result<T, RedError>;
+impl ::std::convert::From<EnvError> for Box<RedError> {
+    fn from(e: EnvError) -> Self {
+        Box::new(RedError::Env(e))
+    }
+}
 
-pub struct Context<T> {
-    term_arena: Arena<T>,
+// We box the Error to shrink the Result size.
+pub type RedResult<T> = Result<T, Box<RedError>>;
+
+/// Specification of the reduction function.
+
+/// Flags of reduction and cache of constants: 'a is a type that may be
+/// mapped to constr. 'a infos implements a cache for constants and
+/// abstractions, storing a representation (of type 'a) of the body of
+/// this constant or abstraction.
+///  * i_tab is the cache table of the results
+///  * i_repr is the function to get the representation from the current
+///         state of the cache and the body of the constant. The result
+///         is stored in the table.
+///  * i_rels = (4,[(1,c);(3,d)]) means there are 4 free rel variables
+///    and only those with index 1 and 3 have bodies which are c and d resp.
+///
+/// ref_value_cache searchs in the tab, otherwise uses i_repr to
+/// compute the result and store it in the table. If the constant can't
+/// be unfolded, returns None, but does not store this failure.  * This
+/// doesn't take the RESET into account. You mustn't keep such a table
+/// after a Reset.  * This type is not exported. Only its two
+/// instantiations (cbv or lazy) are.
+
+bitflags! {
+    pub struct Reds : u8 {
+        const BETA  = 0b0001;
+        const DELTA = 0b0010;
+        const IOTA  = 0b0100;
+        const ZETA  = 0b1000;
+
+        const BETADELTAIOTA = Self::BETA.bits | Self::DELTA.bits | Self::ZETA.bits |
+                              Self::IOTA.bits;
+        const BETADELTAIOTANOLET = Self::BETA.bits | Self::DELTA.bits | Self::IOTA.bits;
+        const BETAIOTAZETA = Self::BETA.bits | Self::IOTA.bits | Self::ZETA.bits;
+    }
+}
+
+pub struct Context<'a, 'b> where 'b: 'a {
+    term_arena: Arena<FTerm<'a, 'b>>,
+    // constr_arena: Arena<FConstr<'a, 'b>>
     // Not clear to me if this would actually be an optimization (at least, not with the current
     // substitution structure).  The reason being that the amount of sharing we can actually get
     // out of it seems limited, since the interesting reduction steps usually require mutating
@@ -84,6 +129,17 @@ pub struct Context<T> {
 }
 
 pub type TableKeyC<'b> = TableKey<MRef<'b, PUniverses<Cst>>>;
+
+// TODO: Use custom KeyHash algorithm.
+struct KeyTable<'b, T>(HashMap<TableKeyC<'b>, T>);
+
+pub struct Infos<'a, 'b, T> where 'b: 'a {
+  flags : Reds,
+  // i_repr : 'a infos -> constr -> 'a;
+  env: &'a mut Env<'b>,
+  // i_rels : int * (int * constr) list;
+  tab: KeyTable<'b, T>,
+}
 
 #[derive(Copy,Clone,Debug,PartialEq)]
 pub enum RedState {
@@ -156,7 +212,7 @@ pub enum StackMember<'a, 'b, Inst, Shft> where 'b: 'a {
     Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
          Vec<FConstr<'a, 'b>>, Inst),
     CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>, Inst),
-    Proj(Idx, Idx, &'b Cst, bool, Inst),
+    Proj(usize, usize, &'b Cst, bool, Inst),
     Fix(FConstr<'a, 'b>, Stack<'a, 'b, Inst, Shft>, Inst),
     Shift(Idx, Shft),
     Update(&'a FConstr<'a, 'b>, Inst),
@@ -210,7 +266,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
         self.term.set(term);
     }
 
-    fn lft(&self, mut n: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
+    fn lft(&self, mut n: Idx, ctx: &'a Context<'a, 'b>) -> IdxResult<Self> {
         let mut ft = self;
         loop {
             match *ft.fterm().expect("Tried to lift a locked term") {
@@ -259,7 +315,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
     }
 
     /// Lifting specialized to the case where n = 0.
-    fn lft0(&self, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Self> {
+    fn lft0(&self, ctx: &'a Context<'a, 'b>) -> IdxResult<Self> {
         match *self.fterm().expect("Tried to lift a locked term") {
             FTerm::Ind(_) | FTerm::Construct(_)
             | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => Ok(self.clone()),
@@ -278,8 +334,8 @@ impl<'a, 'b> FConstr<'a, 'b> {
 
     /// The inverse of mk_clos_deep: move back to constr
     fn to_constr<F>(&self, constr_fun: F, lfts: &Lift,
-                    ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr>
-        where F: Fn(&FConstr<'a, 'b>, &Lift, &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr>,
+                    ctx: &'a Context<'a, 'b>) -> IdxResult<Constr>
+        where F: Fn(&FConstr<'a, 'b>, &Lift, &'a Context<'a, 'b>) -> IdxResult<Constr>,
     {
         // FIXME: The constant cloning of lfts can likely be replaced by a slightly different API
         // where lfts is taken mutably, and added shifts or lifts can be pushed for a scope, then
@@ -513,7 +569,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
     }
 
     fn zip<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
-           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+           ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         let mut m = Cow::Borrowed(self);
         while let Some(s) = stk.pop() {
             match s {
@@ -578,13 +634,13 @@ impl<'a, 'b> FConstr<'a, 'b> {
     }
 
     fn fapp_stack<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
-                        ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+                        ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         self.zip(stk, ctx)
     }
 }
 
 impl<'a, 'b> Subs<FConstr<'a, 'b>> {
-    fn clos_rel(&self, i: Idx, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+    fn clos_rel(&self, i: Idx, ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         match self.expand_rel(i)? {
             (n, Expr::Val(mt)) => mt.lft(n, ctx),
             (k, Expr::Var(None)) => Ok(FConstr {
@@ -637,7 +693,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     /// Optimization: do not enclose variables in a closure.
     /// Makes variable access much faster
     pub fn mk_clos(&self, t: &'b Constr,
-                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+                   ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         match *t {
             Constr::Rel(i) => { self.clos_rel(Idx::new(NonZero::new(i)?)?, ctx) },
             Constr::Const(ref c) => Ok(FConstr {
@@ -671,7 +727,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     }
 
     pub fn mk_clos_vect(&self, v: &'b [Constr],
-                        ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Vec<FConstr<'a, 'b>>> {
+                        ctx: &'a Context<'a, 'b>) -> IdxResult<Vec<FConstr<'a, 'b>>> {
         // Expensive, makes a vector
         v.into_iter().map( |t| self.mk_clos(t, ctx)).collect()
     }
@@ -681,9 +737,9 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     /// subterms.
     /// Could be used insted of mk_clos.
     pub fn mk_clos_deep<F>(&self, clos_fun: F, t: &'b Constr,
-                           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>
+                           ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>
         where F: Fn(&Subs<FConstr<'a, 'b>>,
-                    &'b Constr, &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>,
+                    &'b Constr, &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>,
     {
         match *t {
             Constr::Rel(_) | Constr::Ind(_) |
@@ -801,7 +857,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
 
     /// A better mk_clos?
     fn mk_clos2(&self, t: &'b Constr,
-                ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+                ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         self.mk_clos_deep((Subs::<FConstr>::mk_clos), t, ctx)
     }
 }
@@ -846,7 +902,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     // since the head may be reducible, we might introduce lifts of 0
     // FIXME: Above comment is not currently true.  Should it be?
     fn compact(&mut self, head: &FConstr<'a, 'b>,
-               ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+               ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
@@ -881,8 +937,8 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     }
 
     /// Put an update mark in the stack, only if needed
-    fn update(&mut self, i: I, m: &'a FConstr<'a, 'b>,
-              ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+    fn update(&mut self, m: &'a FConstr<'a, 'b>, i: I,
+              ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
         if m.norm.get() == RedState::Red {
             // const LOCKED: &'static FTerm<'static> = &FTerm::Locked;
             self.compact(&m, ctx)?;
@@ -898,7 +954,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
 
     /// optimized for the case where there are no shifts...
     fn strip_update_shift_app(&mut self, mut head: FConstr<'a, 'b>,
-                              ctx: &'a Context<FTerm<'a, 'b>>) ->
+                              ctx: &'a Context<'a, 'b>) ->
                               IdxResult<((Option<Idx>, Stack<'a, 'b, /* !, */I, S>))> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
@@ -943,7 +999,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     }
 
     fn get_nth_arg(&mut self, mut head: FConstr<'a, 'b>, mut n: usize,
-                   ctx: &'a Context<FTerm<'a, 'b>>) ->
+                   ctx: &'a Context<'a, 'b>) ->
                    IdxResult<Option<(Stack<'a, 'b, /* ! */I, S>, FConstr<'a, 'b>)>> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
@@ -1018,7 +1074,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                 mut tys: &[MRef<'b, (Name, Constr, Constr)>],
                 f: &'b Constr,
                 mut e: Subs<FConstr<'a, 'b>>,
-                ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Application<FConstr<'a, 'b>>> {
+                ctx: &'a Context<'a, 'b>) -> IdxResult<Application<FConstr<'a, 'b>>> {
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::Update(r, _) => {
@@ -1080,7 +1136,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
 
 impl<'a, 'b, I> Stack<'a, 'b, I, ()> { */
     /// Eta expansion: add a reference to implicit surrounding lambda at end of stack
-    pub fn eta_expand_stack(&mut self, ctx: &'a Context<FTerm<'a, 'b>>, s: S) -> IdxResult<()> {
+    pub fn eta_expand_stack(&mut self, ctx: &'a Context<'a, 'b>, s: S) -> IdxResult<()> {
         // FIXME: Given that we want to do this, seriously consider using a VecDeque rather than a
         // stack.  That would make this operation O(1).  The only potential downside would be less
         // easy slicing, but that might not matter too much if we do things correctly (as_slices is
@@ -1105,7 +1161,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// - stack is composed exclusively of Apps and Shifts.
     /// - depth = sum of shifts in this stack.
     fn reloc_rargs(&mut self, depth: Option<Idx>,
-                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+                   ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
         let mut depth = if let Some(depth) = depth { depth } else { return Ok(()) };
         let done = Cell::new(None);
         // We wastefully drop the shifts.
@@ -1160,7 +1216,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// (strip_update_shift_app produces a stack with only Zapp and Zshift items, and depth = sum
     /// of shifts in the stack).
     fn try_drop_parameters(&mut self, mut depth: Option<Idx>, mut n: usize,
-                           ctx: &'a Context<FTerm<'a, 'b>>) -> RedResult<()> {
+                           ctx: &'a Context<'a, 'b>) -> RedResult<()> {
         // Drop should only succeed here if n == 0 (i.e. there were no additional parameters to
         // drop).  But we should never reach the end of the while loop unless there was no
         // StackMember::App in the stack, because if n = 0, ∀ q : usize, n ≤ q, which would
@@ -1200,7 +1256,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
             }
         }
         // We exhausted the argument stack before we finished dropping all the parameters.
-        return Err(RedError::NotFound)
+        return Err(Box::new(RedError::NotFound))
     }
 
     /// Only call this on type-checked terms (otherwise the assertion may be false!)
@@ -1210,13 +1266,14 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// FIXME: Figure out a way to usefully incorporate "this term has been typechecked" into
     /// Rust's type system (maybe some sort of weird wrapper around Constr?).
     fn drop_parameters(&mut self, depth: Option<Idx>, n: usize,
-                       ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
-        match self.try_drop_parameters(depth, n, ctx) {
-            Err(RedError::NotFound) =>
-                panic!("We know n < stack_arg_size(self) if well-typed term"),
-            Err(RedError::Idx(e)) => Err(e),
-            Ok(o) => Ok(o),
+                       ctx: &'a Context<'a, 'b>) -> RedResult<()> {
+        let res = self.try_drop_parameters(depth, n, ctx);
+        if let Err(ref o) = res {
+            if let RedError::NotFound = **o {
+                panic!("We know n < stack_arg_size(self) if well-typed term");
+            }
         }
+        res
     }
 
     /// Projections and eta expansion
@@ -1243,7 +1300,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                                 m: FConstr<'a, 'b>,
                                 s: &mut Stack<'a, 'b, I, S>,
                                 (f, s_): (FConstr<'a, 'b>, &mut Stack<'a, 'b, I, S>),
-                                ctx: &'a Context<FTerm<'a, 'b>>) ->
+                                ctx: &'a Context<'a, 'b>) ->
         RedResult<(Stack<'a, 'b, I, S>, Stack<'a, 'b, I, S>)>
     {
         let mib = env.lookup_mind(&ind.name).ok_or(RedError::NotFound)?;
@@ -1268,7 +1325,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 // makes a Vec, but not that expensive.
                 Ok((args, Stack(vec![StackMember::App(hstack)])))
             },
-            _ => Err(RedError::NotFound), // disallow eta-exp for non-primitive records
+            _ => Err(Box::new(RedError::NotFound)), // disallow eta-exp for non-primitive records
         }
     }
 
@@ -1295,6 +1352,203 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         }
         panic!("We know m < stack_arg_size(self) if well-typed projection index");
     }
+    /// A machine that inspects the head of a term until it finds an
+    /// atom or a subterm that may produce a redex (abstraction,
+    /// constructor, cofix, letin, constant), or a neutral term (product,
+    /// inductive).
+    ///
+    /// Note: m must be typechecked beforehand!
+    fn knh<'r>(&mut self, info: &'r mut ClosInfos<'r, 'a, 'b>, m: FConstr<'a, 'b>,
+               ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+        where S: Clone, I: Clone,
+    {
+        let mut m: Cow<'a, FConstr<'a, 'b>> = Cow::Owned(m);
+        loop {
+            match *m.fterm().expect("Tried to lift a locked term") {
+                FTerm::Lift(k, ref a) => {
+                    self.shift(k, s.clone())?;
+                    m = Cow::Borrowed(a);
+                },
+                FTerm::Clos(mut t, ref e) => {
+                    if let Cow::Borrowed(m) = m {
+                        // NOTE: We probably only want to bother updating this reference if it's
+                        // shared, right?
+                        self.update(m, i.clone(), ctx)?;
+                    }
+                    // NOTE: Mutual recursion is fine in OCaml since it's all tail recursive, but
+                    // not in Rust.
+                    loop {
+                        // The same for pure terms (knht)
+                        match *t {
+                            Constr::App(ref o) => {
+                                let (ref a, ref b) = **o;
+                                self.append(e.mk_clos_vect(b, ctx)?)?;
+                                t = a;
+                            },
+                            Constr::Case(ref o) => {
+                                let (_, _, ref a, _) = **o;
+                                self.push(StackMember::CaseT(o, e.clone() /* expensive */,
+                                                             i.clone()))?;
+                                t = a;
+                            },
+                            Constr::Fix(_) => { // laziness
+                                // FIXME: Are we creating a term here and then immediately
+                                // destroying it?
+                                m = Cow::Owned(e.mk_clos2(t, ctx)?);
+                                break; // knh
+                            },
+                            Constr::Cast(ref o) => {
+                                let (_, _, ref a) = **o;
+                                t = a;
+                            },
+                            Constr::Rel(n) => {
+                                // TODO: Might know n is NonZero if it's been typechecked?
+                                let n = Idx::new(NonZero::new(n).ok_or(IdxError::from(NoneError))?)?;
+                                m = Cow::Owned(e.clos_rel(n, ctx)?);
+                                break; // knh
+                            },
+                            Constr::Proj(_) => { // laziness
+                                // FIXME: Are we creating a term here and then immediately
+                                // destroying it?
+                                m = Cow::Owned(e.mk_clos2(t, ctx)?);
+                                break; // knh
+                            },
+                            Constr::Lambda(_) | Constr::Prod(_) | Constr::Construct(_) |
+                            Constr::CoFix(_) | Constr::Ind(_) | Constr::LetIn(_) |
+                            Constr::Const(_) | /*Constr::Var(_) | Constr::Evar(_) |
+                            Constr::Meta(_) | */Constr::Sort(_) => return Ok(e.mk_clos2(t, ctx)?),
+                        }
+                    }
+                },
+                FTerm::App(ref a, ref b) => {
+                    if let Cow::Borrowed(m) = m {
+                        // NOTE: We probably only want to bother updating this reference if it's
+                        // shared, right?
+                        self.update(m, i.clone(), ctx)?;
+                    }
+                    self.append(b.clone() /* expensive */)?;
+                    m = Cow::Borrowed(a);
+                },
+                FTerm::Case(o, ref p, ref t, ref br) => {
+                    if let Cow::Borrowed(m) = m {
+                        // NOTE: We probably only want to bother updating this reference if it's
+                        // shared, right?
+                        self.update(m, i.clone(), ctx)?;
+                    }
+                    self.push(StackMember::Case(o, p.clone(), br.clone() /* expensive */,
+                                                i.clone()))?;
+                    m = Cow::Borrowed(t);
+                },
+                FTerm::CaseT(o, ref t, ref env) => {
+                    if let Cow::Borrowed(m) = m {
+                        // NOTE: We probably only want to bother updating this reference if it's
+                        // shared, right?
+                        self.update(m, i.clone(), ctx)?;
+                    }
+                    self.push(StackMember::CaseT(o, env.clone() /* expensive */, i.clone()))?;
+                    m = Cow::Borrowed(t);
+                },
+                FTerm::Fix(o, n, _) => {
+                    let Fix(Fix2(ref ri, _), _) = **o;
+                    // FIXME: Verify that ri[n] in bounds is checked at some point during
+                    // typechecking.  If not, we must check for it here (we never produce terms
+                    // that should make it fail the bounds check provided that ri and bds have the
+                    // same length).
+                    // TODO: Verify that ri[n] is within usize is checked at some point during
+                    // typechecking.
+                    let n = usize::try_from(ri[n]).map_err(IdxError::from)?;
+                    let m_ = m.into_owned();
+                    match self.get_nth_arg(m_.clone(), n, ctx)? {
+                        Some((pars, arg)) => {
+                            self.push(StackMember::Fix(m_, pars, i.clone()))?;
+                            m = Cow::Owned(arg);
+                        },
+                        None => return Ok(m_),
+                    }
+                },
+                FTerm::Cast(ref t, _, _) => {
+                    m = Cow::Borrowed(t);
+                },
+                FTerm::Proj(p, b, ref c) => {
+                    // DELTA
+                    if info.flags.contains(Reds::DELTA) {
+                        // NOTE: Both NotFound and an anomaly would usually be exceptions here,
+                        // but it's not clear to me whether typechecking necessarily catches this
+                        // error, especially since the env can presumably be mutated after
+                        // typechecking.  So I'm choosing not to panic on either lookup failure or
+                        // not finding a projection.  I'm open to changing this!
+                        let pb = info.env.lookup_projection(p)
+                                         .ok_or(RedError::NotFound)??;
+                        if let Cow::Borrowed(m) = m {
+                            // NOTE: We probably only want to bother updating this reference if
+                            // it's shared, right?
+                            self.update(m, i.clone(), ctx)?;
+                        }
+                        // TODO: Verify that npars and arg being within usize is checked at some
+                        // point during typechecking.
+                        let npars = usize::try_from(pb.npars).map_err(IdxError::from)?;
+                        let arg = usize::try_from(pb.arg).map_err(IdxError::from)?;
+                        self.push(StackMember::Proj(npars, arg, p, b, i.clone()))?;
+                        m = Cow::Borrowed(c);
+                    } else {
+                        return Ok(m.into_owned())
+                    }
+                },
+
+                // cases where knh stops
+                FTerm::Flex(_) | FTerm::LetIn(_, _, _, _) | FTerm::Construct(_) |
+                /*FTerm::Evar(_) |*/
+                FTerm::CoFix(_, _, _) | FTerm::Lambda(_, _, _) | FTerm::Rel(_) | FTerm::Atom(_) |
+                FTerm::Ind(_) | FTerm::Prod(_, _, _) => return Ok(m.into_owned()),
+            }
+        }
+    }
+
+    /// The same for pure terms
+    fn knht<'r>(&mut self, info: &'r mut ClosInfos<'r, 'a, 'b>,
+                env: &Subs<FConstr<'a, 'b>>, mut t: &'b Constr,
+                ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+        where S: Clone, I: Clone,
+    {
+        loop {
+            match *t {
+                Constr::App(ref o) => {
+                    let (ref a, ref b) = **o;
+                    self.append(env.mk_clos_vect(b, ctx)?)?;
+                    t = a;
+                },
+                Constr::Case(ref o) => {
+                    let (_, _, ref a, _) = **o;
+                    self.push(StackMember::CaseT(o, env.clone() /* expensive */,
+                                                 i.clone()))?;
+                    t = a;
+                },
+                Constr::Fix(_) => { // laziness
+                    // FIXME: Are we creating a term here and then immediately
+                    // destroying it?
+                    return self.knh(info, env.mk_clos2(t, ctx)?, ctx, i, s)
+                },
+                Constr::Cast(ref o) => {
+                    let (_, _, ref a) = **o;
+                    t = a;
+                },
+                Constr::Rel(n) => {
+                    // TODO: Might know n is NonZero if it's been typechecked?
+                    let n = Idx::new(NonZero::new(n).ok_or(IdxError::from(NoneError))?)?;
+                    return self.knh(info, env.clos_rel(n, ctx)?, ctx, i, s)
+                },
+                Constr::Proj(_) => { // laziness
+                    // FIXME: Are we creating a term here and then immediately
+                    // destroying it?
+                    return self.knh(info, env.mk_clos2(t, ctx)?, ctx, i, s)
+                },
+                Constr::Lambda(_) | Constr::Prod(_) | Constr::Construct(_) |
+                Constr::CoFix(_) | Constr::Ind(_) | Constr::LetIn(_) |
+                Constr::Const(_) | /*Constr::Var(_) | Constr::Evar(_) |
+                Constr::Meta(_) | */Constr::Sort(_) => return Ok(env.mk_clos2(t, ctx)?),
+            }
+        }
+    }
 }
 
 impl<'a, 'b> FTerm<'a, 'b> {
@@ -1303,10 +1557,10 @@ impl<'a, 'b> FTerm<'a, 'b> {
                            tys: &[MRef<'b, (Name, Constr, Constr)>],
                            b: &'b Constr,
                            e: &Subs<FConstr<'a, 'b>>,
-                           ctx: &'a Context<FTerm<'a, 'b>>) ->
+                           ctx: &'a Context<'a, 'b>) ->
         IdxResult<(Name, FConstr<'a, 'b>, FConstr<'a, 'b>)>
         where F: Fn(&Subs<FConstr<'a, 'b>>,
-                    &'b Constr, &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>,
+                    &'b Constr, &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>,
     {
         // FIXME: consider using references to slices for FTerm::Lambda arguments instead of Vecs.
         // That would allow us to avoid cloning tys here.  However, this might not matter if it
@@ -1344,7 +1598,7 @@ impl<'a, 'b> FTerm<'a, 'b> {
     ///
     /// Must be passed a FTerm::Fix or FTerm::CoFix.
     /// Also, the term it is passed must be typechecked.
-    fn contract_fix_vect(&self, ctx: &'a Context<FTerm<'a, 'b>>) ->
+    fn contract_fix_vect(&self, ctx: &'a Context<'a, 'b>) ->
         IdxResult<(Subs<FConstr<'a, 'b>>, &'b Constr)>
     {
         // TODO: This function is *hugely* wasteful.  It allocates a gigantic number of potential
@@ -1408,7 +1662,7 @@ impl<'a, 'b> FTerm<'a, 'b> {
 
 impl Constr {
     fn of_fconstr_lift<'a, 'b>(v: &FConstr<'a, 'b>, lfts: &Lift,
-                           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr> {
+                           ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
         // In general, it might be nice to make this function tail recursive (by using an explicit
         // stack) rather than having confusing mutual recursion between of_fconstr_lift and
         // to_constr.
@@ -1485,8 +1739,11 @@ impl Constr {
     /// then we directly return the constr to avoid possibly huge
     /// reallocation.
     pub fn of_fconstr<'a, 'b>(v: &FConstr<'a, 'b>,
-                              ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Constr> {
+                              ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
         let lfts = Lift::id();
         Constr::of_fconstr_lift(v, &lfts, ctx)
     }
 }
+
+/// cache of constants: the body is computed only when needed.
+pub type ClosInfos<'r, 'a, 'b> = Infos<'r, 'b, FConstr<'a, 'b>>;

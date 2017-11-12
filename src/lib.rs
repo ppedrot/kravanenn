@@ -14,6 +14,9 @@ extern crate core;
 extern crate vec_map;
 extern crate typed_arena;
 
+#[macro_use]
+extern crate bitflags;
+
 pub mod ocaml;
 pub mod coq;
 pub mod hopcroft;

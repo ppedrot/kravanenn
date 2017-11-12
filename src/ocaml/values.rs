@@ -144,7 +144,7 @@ pub struct Cons {
 
 /* kernel/univ */
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Hash, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum RawLevel {
     Prop,
@@ -153,7 +153,7 @@ pub enum RawLevel {
     Level(Int, #[serde(deserialize_state)] ORef<Dp>),
 }
 
-#[derive(Debug, Clone,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState, Hash, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Level {
     hash: Int,
@@ -218,7 +218,7 @@ pub enum SortFam {
     InType,
 }
 
-#[derive(Debug, Clone,DeserializeState)]
+#[derive(Debug, Clone,DeserializeState, Hash, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub struct PUniverses<T>(#[serde(deserialize_state)] T, #[serde(deserialize_state)] Instance);
@@ -403,8 +403,8 @@ pub struct ProjEta(#[serde(deserialize_state)] Constr, #[serde(deserialize_state
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct ProjBody {
     #[serde(deserialize_state)] ind: Cst,
-    npars: Int,
-    arg: Int,
+    pub npars: Int,
+    pub arg: Int,
     #[serde(deserialize_state)] ty: Constr,
     #[serde(deserialize_state)] eta: ProjEta,
     #[serde(deserialize_state)] body: Constr,
@@ -428,7 +428,7 @@ pub struct Cb {
     #[serde(deserialize_state)] body_code: Any,
     polymorphic: Bool,
     #[serde(deserialize_state)] universes: Context,
-    #[serde(deserialize_state)] proj: Opt<ProjBody>,
+    #[serde(deserialize_state)] pub proj: Opt<ProjBody>,
     inline_code: Bool,
     #[serde(deserialize_state)] typing_flags: TypingFlags,
 }
