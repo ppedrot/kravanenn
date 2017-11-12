@@ -1295,6 +1295,41 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         }
         panic!("We know m < stack_arg_size(self) if well-typed projection index");
     }
+}
+
+impl<'a, 'b> FTerm<'a, 'b> {
+    /// Do not call this function unless tys.len() ≥ 1.
+    pub fn dest_flambda<F>(clos_fun: F,
+                           tys: &[MRef<'b, (Name, Constr, Constr)>],
+                           b: &'b Constr,
+                           e: &Subs<FConstr<'a, 'b>>,
+                           ctx: &'a Context<FTerm<'a, 'b>>) ->
+        IdxResult<(Name, FConstr<'a, 'b>, FConstr<'a, 'b>)>
+        where F: Fn(&Subs<FConstr<'a, 'b>>,
+                    &'b Constr, &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>,
+    {
+        // FIXME: consider using references to slices for FTerm::Lambda arguments instead of Vecs.
+        // That would allow us to avoid cloning tys here.  However, this might not matter if it
+        // turns out the uses of dest_flambda are inherently wasteful.
+        // UPDATE: It turns out get_args would also probably benefit from FTerm::Lambda using
+        // slices or pointers.
+        // FIXME: If we do for some reason stick with vectors, no need to convert and then pop...
+        // can just convert the slice.  Might make a vector size difference, if nothing else.
+        let mut tys = tys.to_vec(); // expensive
+        let o = tys.pop().expect("Should not call dest_flambda with tys.len() = 0");
+        let (ref na, ref ty, _) = **o;
+        let ty = clos_fun(e, ty, ctx)?;
+        let mut e = e.clone(); /* expensive */
+        e.lift()?;
+        Ok((na.clone(), ty, if tys.len() == 0 {
+            clos_fun(&e, &b, ctx)?
+        } else {
+            FConstr {
+                norm: Cell::new(RedState::Cstr),
+                term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Lambda(tys, b, e))))
+            }
+        }))
+    }
 
     /// Iota reduction: expansion of a fixpoint.
     ///
@@ -1309,8 +1344,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     ///
     /// Must be passed a FTerm::Fix or FTerm::CoFix.
     /// Also, the term it is passed must be typechecked.
-    fn contract_fix_vect(fix: &FTerm<'a, 'b>,
-                         ctx: &'a Context<FTerm<'a, 'b>>) ->
+    fn contract_fix_vect(&self, ctx: &'a Context<FTerm<'a, 'b>>) ->
         IdxResult<(Subs<FConstr<'a, 'b>>, &'b Constr)>
     {
         // TODO: This function is *hugely* wasteful.  It allocates a gigantic number of potential
@@ -1326,7 +1360,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         // FIXME: This is a very good example of where sharing subs allocations (or trying to share
         // them) could make a big difference, since we copy the old one indiscriminately to all the
         // (potentially) substituted terms.
-        match *fix {
+        match *self {
             FTerm::Fix(o, i, ref env_) => {
                 // NOTE: i = index of this function into mutually recursive block
                 //       bds = function bodies of the mutually recursive block
@@ -1369,41 +1403,6 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
             },
             _ => panic!("contract_fix_vect must be passed FTerm::Fix or FTerm::Cofix"),
         }
-    }
-}
-
-impl<'a, 'b> FTerm<'a, 'b> {
-    /// Do not call this function unless tys.len() ≥ 1.
-    pub fn dest_flambda<F>(clos_fun: F,
-                           tys: &[MRef<'b, (Name, Constr, Constr)>],
-                           b: &'b Constr,
-                           e: &Subs<FConstr<'a, 'b>>,
-                           ctx: &'a Context<FTerm<'a, 'b>>) ->
-        IdxResult<(Name, FConstr<'a, 'b>, FConstr<'a, 'b>)>
-        where F: Fn(&Subs<FConstr<'a, 'b>>,
-                    &'b Constr, &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>>,
-    {
-        // FIXME: consider using references to slices for FTerm::Lambda arguments instead of Vecs.
-        // That would allow us to avoid cloning tys here.  However, this might not matter if it
-        // turns out the uses of dest_flambda are inherently wasteful.
-        // UPDATE: It turns out get_args would also probably benefit from FTerm::Lambda using
-        // slices or pointers.
-        // FIXME: If we do for some reason stick with vectors, no need to convert and then pop...
-        // can just convert the slice.  Might make a vector size difference, if nothing else.
-        let mut tys = tys.to_vec(); // expensive
-        let o = tys.pop().expect("Should not call dest_flambda with tys.len() = 0");
-        let (ref na, ref ty, _) = **o;
-        let ty = clos_fun(e, ty, ctx)?;
-        let mut e = e.clone(); /* expensive */
-        e.lift()?;
-        Ok((na.clone(), ty, if tys.len() == 0 {
-            clos_fun(&e, &b, ctx)?
-        } else {
-            FConstr {
-                norm: Cell::new(RedState::Cstr),
-                term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Lambda(tys, b, e))))
-            }
-        }))
     }
 }
 
