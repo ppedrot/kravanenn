@@ -296,7 +296,7 @@ pub struct PRec(#[serde(deserialize_state)] pub Array<Name>, #[serde(deserialize
 
 #[derive(DeserializeState, Debug, Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct Fix2(#[serde(deserialize_state)] Array<Int>, Int);
+pub struct Fix2(#[serde(deserialize_state)] pub Array<Int>, pub Int);
 
 #[derive(DeserializeState, Debug, Clone)]
 #[serde(deserialize_state = "Seed<'de>")]

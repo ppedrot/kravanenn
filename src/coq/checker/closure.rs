@@ -10,6 +10,7 @@ use ocaml::values::{
     Name,
     Finite,
     Fix,
+    Fix2,
     Ind,
     PRec,
     Proj,
@@ -119,8 +120,8 @@ pub enum FTerm<'a, 'b> where 'b: 'a {
   Construct(MRef<'b, PUniverses<Cons>>),
   App(FConstr<'a, 'b>, Vec<FConstr<'a, 'b>>),
   Proj(&'b Cst, bool, FConstr<'a, 'b>),
-  Fix(MRef<'b, Fix>, Subs<FConstr<'a, 'b>>),
-  CoFix(MRef<'b, CoFix>, Subs<FConstr<'a, 'b>>),
+  Fix(MRef<'b, Fix>, usize, Subs<FConstr<'a, 'b>>),
+  CoFix(MRef<'b, CoFix>, usize, Subs<FConstr<'a, 'b>>),
   Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>, FConstr<'a, 'b>,
        Vec<FConstr<'a, 'b>>),
   /// predicate and branches are closures
@@ -184,7 +185,7 @@ enum Application<T> {
 }
 
 impl RedState {
-    pub fn neutr(&self) -> Self {
+    fn neutr(&self) -> Self {
         match *self {
             RedState::Whnf => RedState::Whnf,
             RedState::Norm => RedState::Whnf,
@@ -199,11 +200,11 @@ impl<'a, 'b> FConstr<'a, 'b> {
         self.term.get()
     }
 
-    pub fn set_norm(&self) {
+    fn set_norm(&self) {
         self.norm.set(RedState::Norm)
     }
 
-    pub fn update(&self, no: RedState, term: Option<&'a FTerm<'a, 'b>>) {
+    fn update(&self, no: RedState, term: Option<&'a FTerm<'a, 'b>>) {
         // Could issue a warning if no is still Red, pointing out that we lose sharing.
         self.norm.set(no);
         self.term.set(term);
@@ -229,20 +230,20 @@ impl<'a, 'b> FConstr<'a, 'b> {
                                                                    f, e)))),
                     })
                 },
-                FTerm::Fix(fx, ref e) => {
+                FTerm::Fix(fx, i, ref e) => {
                     let mut e = e.clone(); // expensive
                     e.shift(n)?;
                     return Ok(FConstr {
                         norm: Cell::new(RedState::Cstr),
-                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(fx, e)))),
+                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(fx, i, e)))),
                     })
                 },
-                FTerm::CoFix(cfx, ref e) => {
+                FTerm::CoFix(cfx, i, ref e) => {
                     let mut e = e.clone(); // expensive
                     e.shift(n)?;
                     return Ok(FConstr {
                         norm: Cell::new(RedState::Cstr),
-                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(cfx, e)))),
+                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(cfx, i, e)))),
                     })
                 },
                 FTerm::Lift(k, ref m) => {
@@ -266,7 +267,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                 norm: Cell::new(RedState::Norm),
                 term: self.term.clone(),
             }),
-            FTerm::Lambda(_, _, _) | FTerm::Fix(_, _) | FTerm::CoFix(_, _) => Ok(FConstr {
+            FTerm::Lambda(_, _, _) | FTerm::Fix(_, _, _) | FTerm::CoFix(_, _, _) => Ok(FConstr {
                 norm: Cell::new(RedState::Cstr),
                 term: self.term.clone(),
             }),
@@ -345,13 +346,13 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     return Ok(Constr::Case(ORef(Rc::from((ci.clone(), p, c,
                                                           Array(Rc::from(ve?)))))))
                 },
-                FTerm::Fix(o, ref e) => {
+                FTerm::Fix(o, i, ref e) => {
                     // FIXME: The recursion here seems like it potentially wastes a lot of work
                     // converting Constrs to FTerms and back... same with CoFix below, and possibly
                     // CaseT above to some extent.  Also, we probably prematurely allocate a few
                     // times, since this is one of the cases where we only need references to
                     // FTerms and FConstrs rather than full-fledged FTerms / FConstrs.
-                    let Fix(ref op, PRec(ref lna, ref tys, ref bds)) = **o;
+                    let Fix(Fix2(ref reci, _), PRec(ref lna, ref tys, ref bds)) = **o;
                     // expensive, makes a Vec
                     let ftys: Result<Vec<_>, _> = tys.iter()
                         .map( |t| e.mk_clos(t, ctx))
@@ -382,13 +383,20 @@ impl<'a, 'b> FConstr<'a, 'b> {
                            .map( |t| constr_fun(&t?, &lfts, ctx))
                            .collect()
                     };
-                    return Ok(Constr::Fix(ORef(Rc::from(Fix(op.clone(),
+                    // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
+                    // i64 if it was created directly from a Constr.  We also know that i fits in
+                    // an isize if it was created by unfolding a Fix, since all the FTerm::Fix
+                    // terms we derive have i < reci.len(), and reci is a vector; Rust guarantees
+                    // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
+                    // be determined is whether isize is always guaranteed to fit in an i64.  If
+                    // that's true, this cast necessarily succeeds.
+                    return Ok(Constr::Fix(ORef(Rc::from(Fix(Fix2(reci.clone(), i as i64),
                                                             PRec(lna.clone(),
                                                                  Array(Rc::new(ftys?)),
                                                                  Array(Rc::new(fbds?))))))))
                 },
-                FTerm::CoFix(o, ref e) => {
-                    let CoFix(op, PRec(ref lna, ref tys, ref bds)) = **o;
+                FTerm::CoFix(o, i, ref e) => {
+                    let CoFix(_, PRec(ref lna, ref tys, ref bds)) = **o;
                     // expensive, makes a Vec
                     let ftys: Result<Vec<_>, _> = tys.iter()
                         .map( |t| e.mk_clos(t, ctx))
@@ -413,7 +421,14 @@ impl<'a, 'b> FConstr<'a, 'b> {
                            .map( |t| constr_fun(&t?, &lfts, ctx))
                            .collect()
                     };
-                    return Ok(Constr::CoFix(ORef(Rc::from(CoFix(op,
+                    // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
+                    // i64 if it was created directly from a Constr.  We also know that i fits in
+                    // an isize if it was created by unfolding a CoFix, since all the FTerm::CoFix
+                    // terms we derive have i < reci.len(), and reci is a vector; Rust guarantees
+                    // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
+                    // be determined is whether isize is always guaranteed to fit in an i64.  If
+                    // that's true, this cast necessarily succeeds.
+                    return Ok(Constr::CoFix(ORef(Rc::from(CoFix(i as i64,
                                                                 PRec(lna.clone(),
                                                                      Array(Rc::new(ftys?)),
                                                                      Array(Rc::new(fbds?))))))))
@@ -562,8 +577,8 @@ impl<'a, 'b> FConstr<'a, 'b> {
         Ok(m.into_owned())
     }
 
-    pub fn fapp_stack<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
-                            ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+    fn fapp_stack<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
+                        ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
         self.zip(stk, ctx)
     }
 }
@@ -722,17 +737,27 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
                 })
             },
             Constr::Fix(ref o) => {
+                let Fix(Fix2(_, i), _) = **o;
+                // TODO: Verify that this is checked at some point during typechecking.
+                // FIXME: Verify that i < reci.len() (etc.) is checked at some point during
+                // typechecking.
+                let i = usize::try_from(i).map_err(IdxError::from)?;
                 let env = self.clone(); // expensive
                 Ok(FConstr {
                     norm: Cell::new(RedState::Cstr),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(o, env)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(o, i, env)))),
                 })
             },
             Constr::CoFix(ref o) => {
+                let CoFix(i, _) = **o;
+                // TODO: Verify that this is checked at some point during typechecking.
+                // FIXME: Verify that i < reci.len() (etc.) is checked at some point during
+                // typechecking.
+                let i = usize::try_from(i).map_err(IdxError::from)?;
                 let env = self.clone(); // expensive
                 Ok(FConstr {
                     norm: Cell::new(RedState::Cstr),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(o, env)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(o, i, env)))),
                 })
             },
             Constr::Lambda(_) => {
@@ -775,8 +800,8 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     }
 
     /// A better mk_clos?
-    pub fn mk_clos2(&self, t: &'b Constr,
-                    ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
+    fn mk_clos2(&self, t: &'b Constr,
+                ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<FConstr<'a, 'b>> {
         self.mk_clos_deep((Subs::<FConstr>::mk_clos), t, ctx)
     }
 }
@@ -810,7 +835,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         self.push(StackMember::App(v))
     }
 
-    pub fn shift(&mut self, n: Idx, s: S) -> IdxResult<()> {
+    fn shift(&mut self, n: Idx, s: S) -> IdxResult<()> {
         if let Some(&mut StackMember::Shift(ref mut k, _)) = self.last_mut() {
             *k = k.checked_add(n)?;
             return Ok(())
@@ -820,8 +845,8 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
 
     // since the head may be reducible, we might introduce lifts of 0
     // FIXME: Above comment is not currently true.  Should it be?
-    pub fn compact(&mut self, head: &FConstr<'a, 'b>,
-                   ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+    fn compact(&mut self, head: &FConstr<'a, 'b>,
+               ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
@@ -856,8 +881,8 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     }
 
     /// Put an update mark in the stack, only if needed
-    pub fn update(&mut self, i: I, m: &'a FConstr<'a, 'b>,
-                  ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+    fn update(&mut self, i: I, m: &'a FConstr<'a, 'b>,
+              ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
         if m.norm.get() == RedState::Red {
             // const LOCKED: &'static FTerm<'static> = &FTerm::Locked;
             self.compact(&m, ctx)?;
@@ -1232,6 +1257,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 let (depth, mut args) = s.strip_update_shift_app(m, ctx)?;
                 // Try to drop the params, might fail on partially applied constructors.
                 args.try_drop_parameters(depth, pars, ctx)?;
+                // expensive: makes a Vec.
                 let hstack: Vec<_> = projs.iter().map( |p| FConstr {
                     norm: Cell::new(RedState::Red), // right can't be a constructor though
                     term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(p, false,
@@ -1239,6 +1265,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 }).collect();
                 // FIXME: Ensure that projs is non-empty, since otherwise we'll have an empty
                 // ZApp.
+                // makes a Vec, but not that expensive.
                 Ok((args, Stack(vec![StackMember::App(hstack)])))
             },
             _ => Err(RedError::NotFound), // disallow eta-exp for non-primitive records
@@ -1267,6 +1294,81 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
             }
         }
         panic!("We know m < stack_arg_size(self) if well-typed projection index");
+    }
+
+    /// Iota reduction: expansion of a fixpoint.
+    ///
+    /// Given a fixpoint and a substitution, returns the corresponding
+    /// fixpoint body, and the substitution in which it should be
+    /// evaluated: its first variables are the fixpoint bodies
+    ///
+    /// FCLOS(fix Fi {F0 := T0 .. Fn-1 := Tn-1}, S)
+    ///    -> (S. FCLOS(F0,S) . ... . FCLOS(Fn-1,S), Ti)
+    ///
+    /// (does not deal with FLIFT)
+    ///
+    /// Must be passed a FTerm::Fix or FTerm::CoFix.
+    /// Also, the term it is passed must be typechecked.
+    fn contract_fix_vect(fix: &FTerm<'a, 'b>,
+                         ctx: &'a Context<FTerm<'a, 'b>>) ->
+        IdxResult<(Subs<FConstr<'a, 'b>>, &'b Constr)>
+    {
+        // TODO: This function is *hugely* wasteful.  It allocates a gigantic number of potential
+        // fixpoint substitutions every time it's called, even though most of them almost certainly
+        // will not be applied (in cases where there's lots of mutually inductive fixpoints).  Not
+        // only that, the fixpoints are almost the same each time (up to the current environment),
+        // so it makes almost no sense to keep reallocating them!  For now we just swallow it, but
+        // there has to be a better way.
+        // NOTE: It's certainly the case that if we *do* needs to use a Fixpoint substitution, it
+        // lives somewhere in the Constr.  So we might at least be able to save the irritating
+        // special casing of Fix and CoFix keeping the index separate by reusing the existing
+        // reference.
+        // FIXME: This is a very good example of where sharing subs allocations (or trying to share
+        // them) could make a big difference, since we copy the old one indiscriminately to all the
+        // (potentially) substituted terms.
+        match *fix {
+            FTerm::Fix(o, i, ref env_) => {
+                // NOTE: i = index of this function into mutually recursive block
+                //       bds = function bodies of the mutually recursive block
+                let Fix(_, PRec(_, _, ref bds)) = **o;
+                let mut env = env_.clone(); // expensive
+                // FIXME: If we can use (boxed?) iterators rather than slices, can we avoid copying
+                // a big vector here?  How important is the cheap at-index access during
+                // substitution, considering that we have to iterate through the list at least once
+                // anyway to create the vector in the first place?
+                // expensive: makes a Vec.
+                env.cons((0..bds.len()).map( |j| {
+                    let env = env_.clone(); // expensive
+                    FConstr {
+                        norm: Cell::new(RedState::Cstr),
+                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(o, j, env)))),
+                    }
+                }).collect())?;
+                // FIXME: Verify that bds[i] in bounds is checked at some point during
+                // typechecking.  If not, we must check for it here.
+                Ok((env, &bds[i]))
+            },
+            FTerm::CoFix(o, i, ref env_) => {
+                let CoFix(_, PRec(_, _, ref bds)) = **o;
+                let mut env = env_.clone(); // expensive
+                // FIXME: If we can use (boxed?) iterators rather than slices, can we avoid copying
+                // a big vector here?  How important is the cheap at-index access during
+                // substitution, considering that we have to iterate through the list at least once
+                // anyway to create the vector in the first place?
+                // expensive: makes a Vec.
+                env.cons((0..bds.len()).map(|j| {
+                    let env = env_.clone(); // expensive
+                    FConstr {
+                        norm: Cell::new(RedState::Cstr),
+                        term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(o, j, env)))),
+                    }
+                }).collect())?;
+                // FIXME: Verify that bds[i] in bounds is checked at some point during
+                // typechecking.  If not, we must check for it here.
+                Ok((env, &bds[i]))
+            },
+            _ => panic!("contract_fix_vect must be passed FTerm::Fix or FTerm::Cofix"),
+        }
     }
 }
 
@@ -1349,8 +1451,32 @@ impl Constr {
                 let c = Constr::of_fconstr_lift(c, lfts, ctx)?;
                 Ok(Constr::Case(ORef(Rc::from((ci.clone(), p.clone(), c, b.clone())))))
             },
-            FTerm::Fix(o, ref e) if e.is_id() => Ok(Constr::Fix(o.clone())),
-            FTerm::CoFix(o, ref e) if e.is_id() => Ok(Constr::CoFix(o.clone())),
+            FTerm::Fix(o, i, ref e) if e.is_id() => {
+                let Fix(Fix2(ref reci, _), ref p) = **o;
+                // TODO: If we can figure out how to cache this we may be able to avoid
+                // allocating a fresh Rc.
+                // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
+                // i64 if it was created directly from a Constr.  We also know that i fits in
+                // an isize if it was created by unfolding a Fix, since all the FTerm::Fix
+                // terms we derive have i < reci.len(), and reci is a vector; Rust guarantees
+                // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
+                // be determined is whether isize is always guaranteed to fit in an i64.  If
+                // that's true, this cast necessarily succeeds.
+                Ok(Constr::Fix(ORef(Rc::from(Fix(Fix2(reci.clone(), i as i64), p.clone())))))
+            },
+            FTerm::CoFix(o, i, ref e) if e.is_id() => {
+                let CoFix(_, ref p) = **o;
+                // TODO: If we can figure out how to cache this we may be able to avoid
+                // allocating a fresh Rc.
+                // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
+                // i64 if it was created directly from a Constr.  We also know that i fits in
+                // an isize if it was created by unfolding a CoFix, since all the FTerm::CoFix
+                // terms we derive have i < reci.len(), and reci is a vector; Rust guarantees
+                // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
+                // be determined is whether isize is always guaranteed to fit in an i64.  If
+                // that's true, this cast necessarily succeeds.
+                Ok(Constr::CoFix(ORef(Rc::from(CoFix(i as i64, p.clone())))))
+            },
             _ => v.to_constr(Constr::of_fconstr_lift, lfts, ctx)
         }
     }
