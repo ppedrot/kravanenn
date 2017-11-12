@@ -3,7 +3,7 @@ use serde;
 
 pub type Fail = !;
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub enum List<T> where T: 'static {
@@ -25,7 +25,7 @@ pub type Int = i64;
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, S>"))]
 pub struct Ref<T>(#[serde(deserialize_state)] T);
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Any;
 
@@ -91,11 +91,11 @@ pub enum Name {
     Name(#[serde(deserialize_state)] Id), // non-anonymous identifier
 }
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct UId(Int, #[serde(deserialize_state)] Str, #[serde(deserialize_state)] Dp);
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Mp {
     Dot(#[serde(deserialize_state)] ORef<Mp>, #[serde(deserialize_state)] Id),
@@ -104,6 +104,8 @@ pub enum Mp {
 }
 
 #[derive(Debug, Clone, DeserializeState)]
+// FIXME: Use OCaml's nice refhash caching.
+#[derive(Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Kn {
     #[serde(deserialize_state)] canary: Any,
@@ -113,7 +115,7 @@ pub struct Kn {
     refhash: Int,
 }
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Cst {
     Dual(#[serde(deserialize_state)] ORef<(Kn, Kn)>), // user then canonical
@@ -124,7 +126,7 @@ pub enum Cst {
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Ind {
     /// the name of the inductive type
-    #[serde(deserialize_state)] name: Cst,
+    #[serde(deserialize_state)] pub name: Cst,
     /// The position of the inductive type within the block of mutually-recursive types.
     /// Beware: indexing starts from 0.
     pos: Int,
@@ -262,7 +264,7 @@ pub enum Cast {
 
 #[derive(DeserializeState,Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct Proj(#[serde(deserialize_state)] Cst, Bool);
+pub struct Proj(#[serde(deserialize_state)] pub Cst, pub Bool);
 
 #[allow(unreachable_code)] // Allowed because of Fail
 #[allow(unreachable_patterns)] // Allowed because of Fail
@@ -481,7 +483,7 @@ pub struct OneInd {
     #[serde(deserialize_state)] reloc_tbl: Any,
 }
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Finite {
     Finite,
@@ -491,7 +493,7 @@ pub enum Finite {
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct RecordBody(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] Array<Cst>, #[serde(deserialize_state)] Array<ProjBody>);
+pub struct RecordBody(#[serde(deserialize_state)] pub Id, #[serde(deserialize_state)] pub Array<Cst>, #[serde(deserialize_state)] pub Array<ProjBody>);
 
 pub type MindRecord = Opt<Opt<RecordBody>>;
 
@@ -505,11 +507,11 @@ pub type MindRecord = Opt<Opt<RecordBody>>;
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct IndPack {
     #[serde(deserialize_state)] packets: Array<OneInd>,
-    #[serde(deserialize_state)] record: MindRecord,
-    #[serde(deserialize_state)] finite: Finite,
+    #[serde(deserialize_state)] pub record: MindRecord,
+    #[serde(deserialize_state)] pub finite: Finite,
     ntypes: Int,
     #[serde(deserialize_state)] hyps: SectionCtxt,
-    nparams: Int,
+    pub nparams: Int,
     nparams_rec: Int,
     #[serde(deserialize_state)] params_ctxt: Rctxt,
     polymorphic: Bool,

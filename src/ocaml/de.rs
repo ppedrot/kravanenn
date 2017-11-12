@@ -9,13 +9,13 @@ use vec_map::{VecMap};
 use std::any::Any;
 use serde::de::{Error as DeError, IntoDeserializer};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ORef<T>(pub Rc<T>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Array<T>(pub Rc<Vec<T>>);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct Str(pub Rc<Vec<u8>>);
 
 #[derive(Debug)]

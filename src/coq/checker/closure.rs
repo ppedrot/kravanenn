@@ -8,15 +8,19 @@ use ocaml::values::{
     Constr,
     Cst,
     Name,
+    Finite,
     Fix,
     Ind,
     PRec,
     Proj,
     PUniverses,
+    RecordBody,
 };
-use coq::kernel::esubst::{Expr, Idx, IdxResult, SubsV as Subs, Lift};
+use coq::checker::environ::{Env};
+use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, SubsV as Subs, Lift};
 use typed_arena::{Arena};
 use core::nonzero::NonZero;
+use core::convert::{TryFrom};
 use ocaml::de::{Array, ORef};
 use std::borrow::{Cow};
 use std::mem;
@@ -45,6 +49,19 @@ pub enum TableKey<T> {
     // VarKey(Id),
     RelKey(Idx),
 }
+
+pub enum RedError {
+    Idx(IdxError),
+    NotFound,
+}
+
+impl ::std::convert::From<IdxError> for RedError {
+    fn from(e: IdxError) -> Self {
+        RedError::Idx(e)
+    }
+}
+
+pub type RedResult<T> = Result<T, RedError>;
 
 pub struct Context<T> {
     term_arena: Arena<T>,
@@ -101,7 +118,7 @@ pub enum FTerm<'a, 'b> where 'b: 'a {
   Ind(MRef<'b, PUniverses<Ind>>),
   Construct(MRef<'b, PUniverses<Cons>>),
   App(FConstr<'a, 'b>, Vec<FConstr<'a, 'b>>),
-  Proj(MRef<'b, (Proj, Constr)>, FConstr<'a, 'b>),
+  Proj(&'b Cst, bool, FConstr<'a, 'b>),
   Fix(MRef<'b, Fix>, Subs<FConstr<'a, 'b>>),
   CoFix(MRef<'b, CoFix>, Subs<FConstr<'a, 'b>>),
   Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>, FConstr<'a, 'b>,
@@ -138,7 +155,7 @@ pub enum StackMember<'a, 'b, Inst, Shft> where 'b: 'a {
     Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
          Vec<FConstr<'a, 'b>>, Inst),
     CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>, Inst),
-    Proj(Idx, Idx, MRef<'b, (Proj, Constr)>, Inst),
+    Proj(Idx, Idx, &'b Cst, bool, Inst),
     Fix(FConstr<'a, 'b>, Stack<'a, 'b, Inst, Shft>, Inst),
     Shift(Idx, Shft),
     Update(&'a FConstr<'a, 'b>, Inst),
@@ -409,10 +426,9 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         .collect();
                     return Ok(Constr::App(ORef(Rc::from((f, Array(Rc::from(ve?)))))))
                 },
-                FTerm::Proj(o, ref c) => {
-                    let (ref p, _) = **o;
+                FTerm::Proj(p, b, ref c) => {
                     let c = constr_fun(c, &lfts, ctx)?;
-                    return Ok(Constr::Proj(ORef(Rc::from((p.clone(), c)))))
+                    return Ok(Constr::Proj(ORef(Rc::from((Proj(p.clone(), b), c)))))
                 },
                 FTerm::Lambda(ref tys, b, ref e) => {
                     // We should know v is nonzero, if Lambda was created properly.
@@ -510,9 +526,9 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         term: Cell::new(Some(ctx.term_arena.alloc(t))),
                     });
                 },
-                StackMember::Proj(_, _, o, _) => {
+                StackMember::Proj(_, _, p, b, _) => {
                     let norm = m.norm.get().neutr();
-                    let t = FTerm::Proj(o, m.into_owned());
+                    let t = FTerm::Proj(p, b, m.into_owned());
                     m = Cow::Owned(FConstr {
                         norm: Cell::new(norm),
                         term: Cell::new(Some(ctx.term_arena.alloc(t))),
@@ -687,13 +703,11 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
                 })
             },
             Constr::Proj(ref o) => {
-                let c = {
-                    let (_, ref c) = **o;
-                    clos_fun(self, c, ctx)?
-                };
+                let (Proj(ref p, b), ref c) = **o;
+                let c = clos_fun(self, c, ctx)?;
                 Ok(FConstr {
                     norm: Cell::new(RedState::Red),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(o, c)))),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(p, b, c)))),
                 })
             },
             Constr::Case(ref o) => {
@@ -860,7 +874,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     /// optimized for the case where there are no shifts...
     fn strip_update_shift_app(&mut self, mut head: FConstr<'a, 'b>,
                               ctx: &'a Context<FTerm<'a, 'b>>) ->
-                              IdxResult<((Option<Idx>, Stack<'a, 'b, !, S>))> {
+                              IdxResult<((Option<Idx>, Stack<'a, 'b, /* !, */I, S>))> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
         assert!(head.norm.get() != RedState::Red);
@@ -905,7 +919,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
 
     fn get_nth_arg(&mut self, mut head: FConstr<'a, 'b>, mut n: usize,
                    ctx: &'a Context<FTerm<'a, 'b>>) ->
-                   IdxResult<Option<(Stack<'a, 'b, !, S>, FConstr<'a, 'b>)>> {
+                   IdxResult<Option<(Stack<'a, 'b, /* ! */I, S>, FConstr<'a, 'b>)>> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
         assert!(head.norm.get() != RedState::Red);
@@ -965,10 +979,10 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         // can avoid a bunch of allocation, it's probably a win... and we might be able
         // to create an iterator that just skips over the updates, or something.
         rstk.reverse();
-        self.extend(rstk.0.into_iter().map( |v| match v {
+        self.extend(rstk.0.into_iter()/* .map( |v| match v {
             StackMember::Shift(k, s) => StackMember::Shift(k, s),
             StackMember::App(args) => StackMember::App(args),
-        }));
+        }) */);
         Ok(None)
     }
 
@@ -1037,11 +1051,11 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         }))
     }
 
-}
+/* }
 
-impl<'a, 'b, I> Stack<'a, 'b, I, ()> {
+impl<'a, 'b, I> Stack<'a, 'b, I, ()> { */
     /// Eta expansion: add a reference to implicit surrounding lambda at end of stack
-    pub fn eta_expand_stack(&mut self, ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
+    pub fn eta_expand_stack(&mut self, ctx: &'a Context<FTerm<'a, 'b>>, s: S) -> IdxResult<()> {
         // FIXME: Given that we want to do this, seriously consider using a VecDeque rather than a
         // stack.  That would make this operation O(1).  The only potential downside would be less
         // easy slicing, but that might not matter too much if we do things correctly (as_slices is
@@ -1053,13 +1067,13 @@ impl<'a, 'b, I> Stack<'a, 'b, I, ()> {
             term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(Idx::ONE)))),
         }];
         self.push(StackMember::App(app))?;
-        self.push(StackMember::Shift(Idx::ONE, ()))?;
+        self.push(StackMember::Shift(Idx::ONE, s))?;
         self.reverse();
         Ok(())
     }
-}
+/* }
 
-impl<'a, 'b, S> Stack<'a, 'b, !, S> {
+impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// Iota reduction: extract the arguments to be passed to the Case
     /// branches
     /// Stacks on which this is called must satisfy:
@@ -1109,6 +1123,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> {
                     // Drop the shift.
                     return true
                 },
+                _ => panic!("Stacks passed to reloc_rargs should only have App and Shift"),
             }
         });
         // Execute the iterator for its side effects.
@@ -1120,14 +1135,14 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> {
     /// (strip_update_shift_app produces a stack with only Zapp and Zshift items, and depth = sum
     /// of shifts in the stack).
     fn try_drop_parameters(&mut self, mut depth: Option<Idx>, mut n: usize,
-                           ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<Result<(), ()>> {
+                           ctx: &'a Context<FTerm<'a, 'b>>) -> RedResult<()> {
         // Drop should only succeed here if n == 0 (i.e. there were no additional parameters to
         // drop).  But we should never reach the end of the while loop unless there was no
         // StackMember::App in the stack, because if n = 0, ∀ q : usize, n ≤ q, which would
         // mean the App branches returned.  Since we don't actually *do* anything in the Shift
         // branch other than decrement depth, it doesn't affect whether n == 0 at the end, so we
         // can just check it at the beginning.
-        if n == 0 { return Ok(Ok(())) }
+        if n == 0 { return Ok(()) }
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::App(args) => {
@@ -1145,7 +1160,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> {
                             self.append(aft)?;
                         }
                         self.reloc_rargs(depth, ctx)?;
-                        return Ok(Ok(()));
+                        return Ok(());
                     }
                 },
                 StackMember::Shift(k, _) => {
@@ -1156,19 +1171,102 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> {
                     // apps in them, and (2) always have depth = sum of shifts.
                     depth = depth.expect(ERR_STRING).checked_sub(k).expect(ERR_STRING);
                 },
+                _ => panic!("Stacks passed to try_drop_parameters should only have App and Shift"),
             }
         }
         // We exhausted the argument stack before we finished dropping all the parameters.
-        return Ok(Err(()))
+        return Err(RedError::NotFound)
     }
 
     /// Only call this on type-checked terms (otherwise the assertion may be false!)
+    /// Also, only call with a stack and depth produced by strip_update_shift_app.
+    /// (strip_update_shift_app produces a stack with only Zapp and Zshift items, and depth = sum
+    /// of shifts in the stack).
     /// FIXME: Figure out a way to usefully incorporate "this term has been typechecked" into
     /// Rust's type system (maybe some sort of weird wrapper around Constr?).
     fn drop_parameters(&mut self, depth: Option<Idx>, n: usize,
                        ctx: &'a Context<FTerm<'a, 'b>>) -> IdxResult<()> {
-        Ok(self.try_drop_parameters(depth, n, ctx)?
-               .expect("We know n < stack_arg_size(self) if well-typed term"))
+        match self.try_drop_parameters(depth, n, ctx) {
+            Err(RedError::NotFound) =>
+                panic!("We know n < stack_arg_size(self) if well-typed term"),
+            Err(RedError::Idx(e)) => Err(e),
+            Ok(o) => Ok(o),
+        }
+    }
+
+    /// Projections and eta expansion
+
+    /* let rec get_parameters depth n argstk =
+      match argstk with
+          Zapp args::s ->
+            let q = Array.length args in
+            if n > q then Array.append args (get_parameters depth (n-q) s)
+            else if Int.equal n q then [||]
+            else Array.sub args 0 n
+        | Zshift(k)::s ->
+          get_parameters (depth-k) n s
+        | [] -> (* we know that n < stack_args_size(argstk) (if well-typed term) *)
+        if Int.equal n 0 then [||]
+        else raise Not_found (* Trying to eta-expand a partial application..., should do
+                    eta expansion first? *)
+        | _ -> assert false
+        (* strip_update_shift_app only produces Zapp and Zshift items *) */
+
+    /// Must be called on a type-checked term.
+    pub fn eta_expand_ind_stack(env: &Env<'b>,
+                                ind: &'b Ind,
+                                m: FConstr<'a, 'b>,
+                                s: &mut Stack<'a, 'b, I, S>,
+                                (f, s_): (FConstr<'a, 'b>, &mut Stack<'a, 'b, I, S>),
+                                ctx: &'a Context<FTerm<'a, 'b>>) ->
+        RedResult<(Stack<'a, 'b, I, S>, Stack<'a, 'b, I, S>)>
+    {
+        let mib = env.lookup_mind(&ind.name).ok_or(RedError::NotFound)?;
+        match mib.record {
+            Some(Some(RecordBody(_, ref projs, _))) if mib.finite != Finite::CoFinite => {
+                // (Construct, pars1 .. parsm :: arg1...argn :: []) ~= (f, s') ->
+                // arg1..argn ~= (proj1 t...projn t) where t = zip (f,s')
+                // TODO: Verify that this is checked at some point during typechecking.
+                let pars = usize::try_from(mib.nparams).map_err(IdxError::from)?;
+                let right = f.fapp_stack(s_, ctx)?;
+                let (depth, mut args) = s.strip_update_shift_app(m, ctx)?;
+                // Try to drop the params, might fail on partially applied constructors.
+                args.try_drop_parameters(depth, pars, ctx)?;
+                let hstack: Vec<_> = projs.iter().map( |p| FConstr {
+                    norm: Cell::new(RedState::Red), // right can't be a constructor though
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(p, false,
+                                                                          right.clone())))),
+                }).collect();
+                // FIXME: Ensure that projs is non-empty, since otherwise we'll have an empty
+                // ZApp.
+                Ok((args, Stack(vec![StackMember::App(hstack)])))
+            },
+            _ => Err(RedError::NotFound), // disallow eta-exp for non-primitive records
+        }
+    }
+
+    /// Only call this on type-checked terms (otherwise the assertion may be false!)
+    /// Also, only call with a stack produced by drop_parameters and an n that is part
+    /// of a projection.
+    /// (drop_parameters produces a stack with only Zapp items, and thanks to type-
+    /// checking n should be an index somewhere in the stack).
+    fn project_nth_arg(&mut self, mut n: usize) -> FConstr<'a, 'b> {
+        while let Some(shead) = self.pop() {
+            match shead {
+                StackMember::App(mut args) => {
+                    let q = args.len();
+                    if n >= q {
+                        // Safe because n >= q → n - q ≥ 0.
+                        n -= q;
+                    } else {
+                        // Safe because n < args.len()
+                        return args.swap_remove(n)
+                    }
+                },
+                _ => panic!("Stacks passed to project_nth_arg should be purely applicative."),
+            }
+        }
+        panic!("We know m < stack_arg_size(self) if well-typed projection index");
     }
 }
 
