@@ -7,8 +7,8 @@ pub type Fail = !;
 
 #[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
-#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
-pub enum List<T> where T: 'static {
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>> + 'static"))]
+pub enum List<T> {
     Nil,
     Cons(#[serde(deserialize_state)] ORef<(T, List<T>)>),
 }
@@ -37,8 +37,8 @@ pub struct Dyn;
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
-#[serde(bound(deserialize = "V: serde::de::DeserializeState<'de, Seed<'de>>"))]
-pub enum Set<V> where V: 'static {
+#[serde(bound(deserialize = "V: serde::de::DeserializeState<'de, Seed<'de>> + 'static"))]
+pub enum Set<V> {
     Nil,
     Node(#[serde(deserialize_state)] ORef<(Set<V>, V, Set<V>, Int)>),
 }
@@ -58,8 +58,8 @@ pub type HSet<V> = Map<Int, Set<V>>;
 
 #[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
-#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
-pub enum HList<T> where T: 'static {
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>> + 'static"))]
+pub enum HList<T> {
     Nil,
     Cons(#[serde(deserialize_state)] ORef<(T, Int, HList<T>)>),
 }
@@ -759,3 +759,42 @@ let register_dyn name t =
 let find_dyn name =
   try IntMap.find name !dyn_table
   with Not_found -> Any*/
+
+/* Some useful helper implementations */
+
+// An iterator specialized to Lists.
+pub struct ListIter<'a, T> where T: 'a {
+    node: &'a List<T>
+}
+
+impl<'a, T> ListIter<'a, T> {
+    fn new(node: &'a List<T>) -> Self {
+        ListIter {
+            node: node,
+        }
+    }
+}
+
+impl<'a, T> Iterator for ListIter<'a, T> {
+    type Item = &'a T;
+
+    // Note: if there were a cycle (which there shouldn't be) in the original List,
+    // this could loop forever.  But if used as intended (from a DeserializeSeed), this is unlikely
+    // to happen, since DeserializeSeed will already loop forever in that case...
+    fn next(&mut self) -> Option<&'a T> {
+        match *self.node {
+            List::Cons(ref node) => {
+                let (ref v, ref next) = **node;
+                self.node = next;
+                return Some(v);
+            },
+            List::Nil => None,
+        }
+    }
+}
+
+impl<T> List<T> {
+    pub fn iter<'a>(&'a self) -> ListIter<'a, T> {
+        ListIter::new(self)
+    }
+}
