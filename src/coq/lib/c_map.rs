@@ -5,6 +5,7 @@ use ocaml::values::{
     Map,
 };
 use serde;
+use std::collections::{HashMap};
 use std::hash::{Hash};
 
 // An iterator specialized to CMaps.
@@ -69,5 +70,18 @@ impl<'de, K, V> serde::de::DeserializeState<'de, Seed<'de>> for Map<K, V>
         // Lazy: we just deserialize the CMap, then add everything to a HashMap.
         let cmap: CMap<K, V> = CMap::deserialize_state(seed, deserializer)?;
         Ok(Map(cmap.iter().map( |(k, v)| (k.clone(), v.clone())).collect()))
+    }
+}
+
+impl<K, V> ::std::ops::Deref for Map<K, V> where K: Hash + Eq {
+    type Target = HashMap<K, V>;
+    fn deref(&self) -> &HashMap<K, V> {
+        &self.0
+    }
+}
+
+impl<K, V> ::std::ops::DerefMut for Map<K, V> where K: Hash + Eq {
+    fn deref_mut(&mut self) -> &mut HashMap<K, V> {
+        &mut self.0
     }
 }
