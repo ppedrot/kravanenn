@@ -1,5 +1,7 @@
-use ocaml::de::{Array, ORef, Str, Seed};
+use ocaml::de::{Array, ORef, Seed, Str};
 use serde;
+use std::collections::{HashMap};
+use std::hash::Hash;
 
 pub type Fail = !;
 
@@ -43,11 +45,14 @@ pub enum Set<V> where V: 'static {
 
 #[derive(DeserializeState,Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
-#[serde(bound(deserialize = "K: serde::de::DeserializeState<'de, Seed<'de>>, V: serde::de::DeserializeState<'de, Seed<'de>>"))]
-pub enum Map<K, V> where K: 'static, V: 'static {
+#[serde(bound(deserialize = "K: serde::de::DeserializeState<'de, Seed<'de>> + 'static, V: serde::de::DeserializeState<'de, Seed<'de>> + 'static"))]
+pub enum CMap<K, V> {
     Nil,
-    Node(#[serde(deserialize_state)] ORef<(Map<K, V>, K, V, Map<K, V>, Int)>),
+    Node(#[serde(deserialize_state)] ORef<(CMap<K, V>, K, V, CMap<K, V>, Int)>),
 }
+
+#[derive(Debug,Clone)]
+pub struct Map<K, V>(pub HashMap<K, V>) where K: Hash + Eq;
 
 pub type HSet<V> = Map<Int, Set<V>>;
 
