@@ -222,7 +222,7 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
                             // We do this dance to ensure that we keep rels the same if there
                             // was a (non-panic) error.  Obviously if there's a panic during
                             // VecMap insertion, this will not work out, but that shouldn't be
-                            // an issue given how VecMap is implemented [in particular, it
+                            // an issue given how VecMap is implemented (in particular, it
                             // shouldn't shrink after remove is run, so it should still have
                             // space for i).
                             //
@@ -262,26 +262,6 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
             },
         }))
     }
-    /*let ref_value_cache info ref =
-  try
-    Some (KeyTable.find info.i_tab ref)
-  with Not_found ->
-  try
-    let body =
-      match ref with
-	| RelKey n ->
-	    let (s,l) = info.i_rels in lift n (Int.List.assoc (s-n) l)
-	| VarKey id -> raise Not_found
-	| ConstKey cst -> constant_value info.i_env cst
-    in
-    let v = info.i_repr info body in
-    KeyTable.add info.i_tab ref v;
-    Some v
-  with
-    | Not_found (* List.assoc *)
-    | NotEvaluableConst _ (* Const *)
-      -> None
-    ref_value_cache*/
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -1744,7 +1724,26 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 },
                 FTerm::Flex(rf) if info.flags.contains(Reds::DELTA) => {
                     let v = match info.ref_value_cache(rf, ctx)? {
-                        Some(v) => v.clone(),
+                        Some(v) => {
+                            // TODO: Consider somehow keeping a reference alive here (maybe by
+                            // allocating the term in an arena).  This is the only place (I
+                            // believe) where we'd want to call knh with something that wasn't
+                            // already owned, but currently we can't for lifetime reasons; the
+                            // arena would fix that, but it seems a bit silly to have a special
+                            // arena just for top-level constant terms.  So let's see what the
+                            // performance impact actually is.
+                            //
+                            // (Also perhaps worth noting: it's not entirely clear to me whether
+                            // this borrowck error is flagging anything real or not.  To figure
+                            // that out we'd have to inspect the stack machine some more to see
+                            // whether there could be any updates left by the time tabs or rels
+                            // needed to be accessed mutably again; knh itself only needs a few
+                            // things in infos to be borrowed mutably, none of which are used by
+                            // ref_value_cache.  If that is indeed the case, we might be able to
+                            // refactor to let update lifetimes live only for the length of the
+                            // knh function call, or something).
+                            v.clone()
+                        },
                         None => {
                             m.set_norm();
                             return Ok(m)
