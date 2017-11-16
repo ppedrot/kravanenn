@@ -2,6 +2,7 @@ use coq::checker::environ::{Env, EnvError};
 use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, Lift, SubsV as Subs};
 use core::convert::{TryFrom};
 use core::nonzero::{NonZero};
+use core::ops::Deref;
 use ocaml::de::{Array, ORef};
 use ocaml::values::{
     CaseInfo,
@@ -23,10 +24,12 @@ use ocaml::values::{
 use std::borrow::{Cow};
 use std::cell::{Cell};
 use std::collections::{HashMap};
+use std::collections::hash_map;
 use std::mem;
 use std::option::{NoneError};
 use std::rc::{Rc};
 use typed_arena::{Arena};
+use vec_map::{self, VecMap};
 
 type MRef<'b, T> = &'b ORef<T>;
 
@@ -45,7 +48,7 @@ type MRef<'b, T> = &'b ORef<T>;
  * constants.
  */
 
-#[derive(Clone,Debug)]
+#[derive(Copy,Clone,Debug,Eq,Hash,PartialEq)]
 pub enum TableKey<T> {
     ConstKey(T),
     // should not occur
@@ -133,12 +136,152 @@ pub type TableKeyC<'b> = TableKey<MRef<'b, PUniverses<Cst>>>;
 // TODO: Use custom KeyHash algorithm.
 struct KeyTable<'b, T>(HashMap<TableKeyC<'b>, T>);
 
-pub struct Infos<'a, 'b, T> where 'b: 'a {
+impl<'b, T> ::std::ops::Deref for KeyTable<'b, T> {
+    type Target = HashMap<TableKeyC<'b>, T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'b, T> ::std::ops::DerefMut for KeyTable<'b, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+pub struct Infos<'a, 'b, 'g, T> where 'b: 'a, 'g: 'b, T: 'a {
   flags : Reds,
   // i_repr : 'a infos -> constr -> 'a;
-  env: &'a mut Env<'b>,
+  env: &'a mut Env<'b, 'g>,
   // i_rels : int * (int * constr) list;
-  tab: KeyTable<'b, T>,
+  rels: (Idx, VecMap<&'b mut Constr>),
+  tab: &'a mut KeyTable<'b, T>,
+}
+
+impl<'b> Into<&'b Constr> for &'b mut Constr {
+    fn into(self) -> &'b Constr {
+        &*self
+    }
+}
+
+pub trait IRepr<'a, 'b> {
+    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
+        where T: Into<&'b Constr> + 'b,
+              T: Deref<Target=Constr>,
+              Self: Sized;
+}
+
+impl<'a, 'b> IRepr<'a, 'b> for FConstr<'a, 'b> {
+    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
+        where T: Into<&'b Constr> + 'b,
+              T: Deref<Target=Constr>,
+    {
+        let env = Subs::id(None);
+        env.mk_clos_raw(c, ctx)
+    }
+}
+
+impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
+    pub fn ref_value_cache<'r>(&'r mut self, rf: TableKeyC<'b>,
+                               ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>> {
+        Ok(Some(match self.tab.entry(rf) {
+            hash_map::Entry::Occupied(o) => o.into_mut(),
+            hash_map::Entry::Vacant(v) => {
+                match rf {
+                    TableKey::RelKey(n) => {
+                        let (s, ref mut l) = self.rels;
+                        if let Ok(Some(i)) = s.checked_sub(n) {
+                            // i is potentially valid, meaning positive i32.  Convert to i32,
+                            // subtract 1, and convert to usize (note: subtracting 1 just packs the
+                            // vector more tightly; it's not really that important, and we might
+                            // stop doing it if it turns out a Vec is a dumb structure here, which
+                            // is quite possible).
+                            // FIXME: Verify that 32 to usize is always a valid cast.
+                            let i = (u32::from(i) - 1) as usize;
+                            let (mut body, old) = if let vec_map::Entry::Occupied(mut o) =
+                                                         l.entry(i) {
+                                let c = o.get().lift(n)?;
+                                // One weird trick to keep your lifetimes in order!
+                                // We remove body from rels; if there's a panic here and we catch
+                                // it before rels goes away, it will be incorrect (proper
+                                // UnwindSafe usage will make this a nonissue, but if we care, we
+                                // can either use take_mut or add a catch_panic here to fix body
+                                // back up).  In the absence of panics, once this block ends nobody
+                                // will ever try to look up this entry directly in i_rels again,
+                                // since ref_value_cache is the only thing that does so and it will
+                                // always take the entry in the outer hash table if it's present;
+                                // therefore, the removal here is fine.
+                                let mut body: &'b mut Constr = o.remove();
+                                let mut old = mem::replace(body, c);
+                                (body, old)
+                            } else {
+                                // Rel is a free variable without a body.
+                                return Ok(None);
+                            };
+
+                            // We do this dance to ensure that we keep rels the same if there
+                            // was a (non-panic) error.  Obviously if there's a panic during
+                            // VecMap insertion, this will not work out, but that shouldn't be
+                            // an issue given how VecMap is implemented [in particular, it
+                            // shouldn't shrink after remove is run, so it should still have
+                            // space for i).
+                            //
+                            // Note that unlike inserting into a vacant HashMap entry or
+                            // reinserting the old VecMap entry (neither of which should panic
+                            // in practice), there is actually a chance that i_repr panics
+                            // here.  To be on the safe side, maybe we should catch_panic
+                            // here (which take_mut would also do for safety reasons).
+                            match T::i_repr(body, ctx) {
+                                Ok(c) => v.insert(c),
+                                Err((e, body)) => {
+                                    mem::replace(body, old);
+                                    l.insert(i, body);
+                                    return Err(e)
+                                },
+                            }
+                            // As mentioned above, this insert shouldn't panic in practice,
+                            // because space for the entry was already reserved.
+                        } else {
+                            // n would definitely be invalid if it were 0 or negative, (it
+                            // wasn't actually a free variable at all), so we know it can't
+                            // have a body.
+                            return Ok(None);
+                        }
+                    },
+                    // | VarKey(id) => raise Not_found
+                    TableKey::ConstKey(cst) => {
+                        if let Some(Ok(body)) = self.env.constant_value(cst) {
+                            v.insert(T::i_repr(body, ctx).map_err( |(e, _)| e)?)
+                        } else {
+                            // We either encountered a lookup error, or cst was not an
+                            // evaluable constant; in either case, we can't return a body.
+                            return Ok(None);
+                        }
+                    },
+                }
+            },
+        }))
+    }
+    /*let ref_value_cache info ref =
+  try
+    Some (KeyTable.find info.i_tab ref)
+  with Not_found ->
+  try
+    let body =
+      match ref with
+	| RelKey n ->
+	    let (s,l) = info.i_rels in lift n (Int.List.assoc (s-n) l)
+	| VarKey id -> raise Not_found
+	| ConstKey cst -> constant_value info.i_env cst
+    in
+    let v = info.i_repr info body in
+    KeyTable.add info.i_tab ref v;
+    Some v
+  with
+    | Not_found (* List.assoc *)
+    | NotEvaluableConst _ (* Const *)
+      -> None
+    ref_value_cache*/
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -271,7 +414,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
         loop {
             match *ft.fterm().expect("Tried to lift a locked term") {
                 FTerm::Ind(_) | FTerm::Construct(_)
-                | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => return Ok(self.clone()),
+                | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => return Ok(ft.clone()),
                 FTerm::Rel(i) => return Ok(FConstr {
                     norm: Cell::new(RedState::Norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(i.checked_add(n)?)))),
@@ -396,7 +539,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     let c = constr_fun(c, &lfts, ctx)?;
                     // expensive -- allocates a Vec
                     let ve: Result<Vec<_>, _> = ve.iter()
-                        .map( |t| e.mk_clos(t, ctx))
+                        .map( |t: &'b Constr| e.mk_clos(t, ctx))
                         .map( |v| constr_fun(&v?, &lfts, ctx) )
                         .collect();
                     return Ok(Constr::Case(ORef(Rc::from((ci.clone(), p, c,
@@ -690,18 +833,38 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
         Ok(FTerm::Lambda(rvars, t_, self))
     }
 
-    /// Optimization: do not enclose variables in a closure.
-    /// Makes variable access much faster
-    pub fn mk_clos(&self, t: &'b Constr,
-                   ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
+    fn mk_clos_raw<T>(&self, t: T,
+                      ctx: &'a Context<'a, 'b>) -> Result<FConstr<'a, 'b>, (IdxError, T)>
+        where T: Into<&'b Constr> + 'b,
+              T: Deref<Target=Constr>,
+    {
+        if let Constr::Rel(i) = *t {
+           let i = match NonZero::new(i) {
+               Some(i) => i,
+               None => return Err((IdxError::from(NoneError), t))
+           };
+           let i = match Idx::new(i) {
+               Ok(i) => i,
+               Err(e) => return Err((e, t))
+           };
+           return match self.clos_rel(i, ctx) {
+               Err(e) => Err((e, t)),
+               Ok(i)  => Ok(i),
+           }
+        }
+        // We have to split out these cases because the first one requires us to have ownership
+        // over the original T.  This is what we get for trying to be generic over &mut and &.
+        // Maybe we should just have two versions of this function...
+        let t = t.into();
         match *t {
-            Constr::Rel(i) => { self.clos_rel(Idx::new(NonZero::new(i)?)?, ctx) },
+            Constr::Rel(_) =>
+                unreachable!("Rel was already handled"),
             Constr::Const(ref c) => Ok(FConstr {
                 norm: Cell::new(RedState::Red),
                 term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Flex(TableKey::ConstKey(c))))),
             }),
-            /* Constr::Meta(_) | Constr::Var(_) | Constr::Evar(_) =>
-                unreachable!("Constrs should not be Meta, Var, or Evar"), */
+            /*Constr::Meta(_) | Constr::Var(_) | Constr::Evar(_) =>
+                unreachable!("Constrs should not be Meta, Var, or Evar"),*/
             Constr::Sort(_) => Ok(FConstr {
                 norm: Cell::new(RedState::Norm),
                 term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Atom(t)))),
@@ -724,6 +887,14 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
                             FTerm::Clos(t, self.clone() /* expensive */))))
             }),
         }
+    }
+
+    /// Optimization: do not enclose variables in a closure.
+    /// Makes variable access much faster
+    pub fn mk_clos(&self, t: &'b Constr,
+                   ctx: &'a Context<'a, 'b>) -> Result<FConstr<'a, 'b>, IdxError>
+    {
+        self.mk_clos_raw(t, ctx).map_err( |(e, _)| e)
     }
 
     pub fn mk_clos_vect(&self, v: &'b [Constr],
@@ -1295,12 +1466,12 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         (* strip_update_shift_app only produces Zapp and Zshift items *) */
 
     /// Must be called on a type-checked term.
-    pub fn eta_expand_ind_stack(env: &Env<'b>,
-                                ind: &'b Ind,
-                                m: FConstr<'a, 'b>,
-                                s: &mut Stack<'a, 'b, I, S>,
-                                (f, s_): (FConstr<'a, 'b>, &mut Stack<'a, 'b, I, S>),
-                                ctx: &'a Context<'a, 'b>) ->
+    pub fn eta_expand_ind_stack<'g>(env: &Env<'b, 'g>,
+                                    ind: &'b Ind,
+                                    m: FConstr<'a, 'b>,
+                                    s: &mut Stack<'a, 'b, I, S>,
+                                    (f, s_): (FConstr<'a, 'b>, &mut Stack<'a, 'b, I, S>),
+                                    ctx: &'a Context<'a, 'b>) ->
         RedResult<(Stack<'a, 'b, I, S>, Stack<'a, 'b, I, S>)>
     {
         let mib = env.lookup_mind(&ind.name).ok_or(RedError::NotFound)?;
@@ -1358,8 +1529,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// inductive).
     ///
     /// Note: m must be typechecked beforehand!
-    fn knh<'r>(&mut self, info: &'r mut ClosInfos<'r, 'a, 'b>, m: FConstr<'a, 'b>,
-               ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    fn knh<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, m: FConstr<'a, 'b>,
+                   ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
         where S: Clone, I: Clone,
     {
         let mut m: Cow<'a, FConstr<'a, 'b>> = Cow::Owned(m);
@@ -1505,9 +1676,11 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     }
 
     /// The same for pure terms
-    fn knht<'r>(&mut self, info: &'r mut ClosInfos<'r, 'a, 'b>,
-                env: &Subs<FConstr<'a, 'b>>, mut t: &'b Constr,
-                ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    ///
+    /// Note: m must be typechecked beforehand!
+    fn knht<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>,
+                    env: &Subs<FConstr<'a, 'b>>, mut t: &'b Constr,
+                    ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
         where S: Clone, I: Clone,
     {
         loop {
@@ -1548,6 +1721,138 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 Constr::Meta(_) | */Constr::Sort(_) => return Ok(env.mk_clos2(t, ctx)?),
             }
         }
+    }
+
+    /// Computes a weak head normal form from the result of knh.
+    ///
+    /// Note: m must be typechecked beforehand!
+    pub fn knr<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, mut m: FConstr<'a, 'b>,
+                       ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+        where S: Clone, I: Clone,
+    {
+        loop {
+            let t = if let Some(t) = m.fterm() { t } else { return Ok(m) };
+            match *t {
+                FTerm::Lambda(ref tys, f, ref e) if info.flags.contains(Reds::BETA) => {
+                    match self.get_args(tys, f, e.clone() /* expensive */, ctx)? {
+                        Application::Full(e) => {
+                            // Mutual tail recursion is fine in OCaml, but not Rust.
+                            m = self.knht(info, &e, f, ctx, i.clone(), s.clone())?;
+                        },
+                        Application::Partial(lam) => return Ok(lam),
+                    }
+                },
+                FTerm::Flex(rf) if info.flags.contains(Reds::DELTA) => {
+                    let v = match info.ref_value_cache(rf, ctx)? {
+                        Some(v) => v.clone(),
+                        None => {
+                            m.set_norm();
+                            return Ok(m)
+                        }
+                    };
+                    // Mutual tail recursion is fine in OCaml, but not Rust.
+                    m = self.knh(info, v, ctx, i.clone(), s.clone())?;
+                },
+                FTerm::Construct(ref o) if info.flags.contains(Reds::IOTA) => {
+                    let c = ((**o).0).0.idx;
+                    let (depth, mut args) = self.strip_update_shift_app(m.clone(), ctx)?;
+                    let shead = if let Some(shead) = self.pop() { shead } else {
+                        *self = args;
+                        return Ok(m)
+                    };
+                    match shead {
+                        StackMember::Case(o, _, mut br, _) => {
+                            let (ref ci, _, _, _) = **o;
+                            // TODO: Verify that this is checked at some point during typechecking.
+                            let npar = usize::try_from(ci.npar).map_err(IdxError::from)?;
+                            args.drop_parameters(depth, npar, ctx)?;
+                            // TODO: Verify that this is checked at some point during typechecking.
+                            let c = usize::try_from(c).map_err(IdxError::from)?;
+                            self.extend(args.0.into_iter());
+                            // FIXME: Verify that after typechecking, c > 0.
+                            m = br.remove(c - 1);
+                        },
+                        StackMember::CaseT(o, env, i) => {
+                            let (ref ci, _, _, ref br) = **o;
+                            // TODO: Verify that this is checked at some point during typechecking.
+                            let npar = usize::try_from(ci.npar).map_err(IdxError::from)?;
+                            args.drop_parameters(depth, npar, ctx)?;
+                            // TODO: Verify that this is checked at some point during typechecking.
+                            let c = usize::try_from(c).map_err(IdxError::from)?;
+                            self.extend(args.0.into_iter());
+                            // Mutual tail recursion is fine in OCaml, but not Rust.
+                            // FIXME: Verify that after typechecking, c > 0.
+                            m = self.knht(info, &env, &br[c - 1], ctx, i, s.clone())?;
+                        },
+                        StackMember::Fix(fx, par, i) => {
+                            let rarg = m.fapp_stack(&mut args, ctx)?;
+                            // makes a Vec, but not that expensive.
+                            self.append(vec![rarg])?;
+                            self.extend(par.0.into_iter());
+                            let (fxe, fxbd) = fx.fterm()
+                                .expect("Tried to lift a locked term")
+                                .contract_fix_vect(ctx)?;
+                            // Mutual tail recursion is fine in OCaml, but not Rust.
+                            m = self.knht(info, &fxe, fxbd, ctx, i, s.clone())?;
+                        },
+                        StackMember::Proj(n, m_, _, _, i) => {
+                            args.drop_parameters(depth, n, ctx)?;
+                            let rarg = args.project_nth_arg(m_);
+                            // Mutual tail recursion is fine in OCaml, but not Rust.
+                            m = self.knh(info, rarg, ctx, i, s.clone())?;
+                        },
+                        _ => {
+                            // It was fine on the stack before, so it should be fine now.
+                            self.0.push(shead);
+                            self.extend(args.0.into_iter());
+                            return Ok(m);
+                        },
+                    }
+                },
+                FTerm::CoFix(_, _, _) if info.flags.contains(Reds::IOTA) => {
+                    let (_, mut args) = self.strip_update_shift_app(m.clone(), ctx)?;
+                    match self.last() {
+                        Some(&StackMember::Case(_, _, _, _)) |
+                        Some(&StackMember::CaseT(_, _, _)) => {
+                            let (fxe,fxbd) = m.fterm()
+                                .expect("Tried to lift a locked term")
+                                .contract_fix_vect(ctx)?;
+                            self.extend(args.0.into_iter());
+                            // Mutual tail recursion is fine in OCaml, but not Rust.
+                            m = self.knht(info, &fxe, fxbd, ctx, i.clone(), s.clone())?;
+                        },
+                        Some(_) => {
+                            self.extend(args.0.into_iter());
+                            return Ok(m);
+                        },
+                        None => {
+                            *self = args;
+                            return Ok(m);
+                        }
+                    }
+                },
+                FTerm::LetIn(o, ref v, _, ref e) if info.flags.contains(Reds::ZETA) => {
+                    let (_, _, _, ref bd) = **o;
+                    let mut e = e.clone(); // expensive
+                    // makes a Vec, but not that expensive.
+                    e.cons(vec![v.clone()])?;
+                    // Mutual tail recursion is fine in OCaml, but not Rust.
+                    m = self.knht(info, &e, bd, ctx, i.clone(), s.clone())?;
+                },
+                _ => return Ok(m)
+            }
+        }
+    }
+
+    /// Computes the weak head normal form of a term
+    ///
+    /// Note: m must be typechecked beforehand!
+    pub fn kni<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, m: FConstr<'a, 'b>,
+                       ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+        where S: Clone, I: Clone,
+    {
+        let hm = self.knh(info, m, ctx, i.clone(), s.clone())?;
+        self.knr(info, hm, ctx, i, s)
     }
 }
 
@@ -1746,4 +2051,4 @@ impl Constr {
 }
 
 /// cache of constants: the body is computed only when needed.
-pub type ClosInfos<'r, 'a, 'b> = Infos<'r, 'b, FConstr<'a, 'b>>;
+pub type ClosInfos<'a, 'b, 'g> = Infos<'a, 'b, 'g, FConstr<'a, 'b>>;

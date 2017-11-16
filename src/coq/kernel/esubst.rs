@@ -36,6 +36,13 @@ impl ::std::convert::From<Idx> for i32 {
     }
 }
 
+impl ::std::convert::From<Idx> for u32 {
+    fn from(idx: Idx) -> u32 {
+        // Valid because idx is a positive i32, which is always in range for u32.
+        idx.0 as u32
+    }
+}
+
 impl ::std::convert::From<NoneError> for IdxError {
     fn from(_: NoneError) -> Self {
         IdxError(())
@@ -90,7 +97,8 @@ pub struct Subs<I> {
     /// Substitution operations (applied in order from right to left).
     ops: Vec<Op<I>>,
     /// ESID(n)             = %n END   bounded identity
-    id: Idx,
+    /// Note that this can be 0, not not negative.
+    id: i32,
 }
 
 #[derive(Clone,Debug)]
@@ -121,8 +129,8 @@ pub enum Expr<T> {
 // trigger GC and don't allocate too frequently for vectors, and
 // don't do much pointer chasing either).
 impl<I> Subs<I> {
-    pub fn id(idx: Idx) -> Self {
-        Subs { ops: Vec::new(), id: idx }
+    pub fn id(idx: Option<Idx>) -> Self {
+        Subs { ops: Vec::new(), id: match idx { Some(Idx(i)) => i, None => 0 } }
     }
 
     fn push(&mut self, o: Op<I>) -> IdxResult<()> {
@@ -157,7 +165,8 @@ impl<I> Subs<I> {
         match self.ops.last_mut() {
             None => {
                 // Coalesce ids with lifts
-                self.id = Idx(self.id.0.checked_add(n.0)?);
+                // This will now definitely be positive.
+                self.id = self.id.checked_add(n.0)?;
                 return Ok(())
             },
             Some(&mut Op::Lift(ref mut p)) => {
@@ -260,7 +269,7 @@ impl<I> Subs<I> {
         // lams + k ≤ i32::MAX * (u32::MAX + 1) = (2^31 - 1) * 2^32 < i64::MAX
         // Cast of k to i64 is valid since u32 to i64 always is.
         // if self.id.0 < k, then 0 < k - self.id.0 ≤ i32::MAX.
-        Ok((Idx(i32::try_from(lams + k as i64)?), Expr::Var(if self.id.0 < k { Some(Idx(k - self.id.0)) } else { None })))
+        Ok((Idx(i32::try_from(lams + k as i64)?), Expr::Var(if self.id < k { Some(Idx(k - self.id)) } else { None })))
     }
 
     /* /// Composition of substitutions: [comp mk_clos s1 s2] computes a

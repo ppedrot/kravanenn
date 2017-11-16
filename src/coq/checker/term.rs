@@ -159,4 +159,23 @@ impl Constr {
             _ => self.map_constr_with_binders(Lift::lift, Self::exliftn, el)
         }
     }
+
+    /// Lifting the binding depth across k bindings
+
+    pub fn liftn(&self, k: Idx, n: Idx) -> IdxResult<Constr> {
+        let mut el = Lift::id();
+        el.shift(k)?;
+        if let Some(n) = n.checked_sub(Idx::ONE).expect("n > 0 - 1 ≥ 0") {
+            el.liftn(n)?;
+        }
+        if el.is_id() {
+            Ok(self.clone())
+        } else {
+            self.exliftn(&el)
+        }
+    }
+
+    pub fn lift(&self, k: Idx) -> IdxResult<Constr> {
+        self.liftn(k, Idx::ONE)
+    }
 }

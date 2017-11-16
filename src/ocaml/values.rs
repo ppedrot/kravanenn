@@ -13,6 +13,24 @@ pub enum List<T> {
     Cons(#[serde(deserialize_state)] ORef<(T, List<T>)>),
 }
 
+#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
+#[serde(deserialize_state = "Seed<'de>")]
+#[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>> + 'static"))]
+/// A version of List that uses ownership rather than Rc.  It isn't totally clear that we actually
+/// *don't* have sharing in the case we're using it, but hopefully we don't, since that gives us
+/// mutable access to things in the list without runtime borrow checking (which will turn out to
+/// be useful in some cases).
+///
+/// TODO: Probably make this just turn into a Vec instead of using the default derivation, as we
+/// know there's no sharing.
+pub enum OList<T> {
+    Nil,
+    Cons(#[serde(deserialize_state)] Box<(T, OList<T>)>),
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct OVec<T>(pub Vec<T>);
+
 pub type Opt<T> = Option<T>;
 
 /* Ocaml standard library */
@@ -144,7 +162,7 @@ pub struct Cons {
     /// designates the inductive type
     #[serde(deserialize_state)] ind: Ind,
     /// The index of the constructor.  Beware: indexing starts from 1.
-    idx: Int,
+    pub idx: Int,
 }
 
 /* kernel/univ */
@@ -226,7 +244,7 @@ pub enum SortFam {
 #[derive(Debug, Clone,DeserializeState, Hash, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
-pub struct PUniverses<T>(#[serde(deserialize_state)] T, #[serde(deserialize_state)] Instance);
+pub struct PUniverses<T>(#[serde(deserialize_state)] pub T, #[serde(deserialize_state)] pub Instance);
 
 pub type BoolList = List<Bool>;
 
@@ -252,7 +270,7 @@ pub struct CPrint {
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct CaseInfo {
     #[serde(deserialize_state)] ind: Ind,
-    npar: Int,
+    pub npar: Int,
     #[serde(deserialize_state)] cstr_ndecls: Array<Int>,
     #[serde(deserialize_state)] cstr_nargs: Array<Int>,
     #[serde(deserialize_state)] cstr_pp_info: CPrint, // not interpreted by the kernel
@@ -346,7 +364,7 @@ pub struct MpResolver(#[serde(deserialize_state)] Mp, #[serde(deserialize_state)
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct Subst(#[serde(deserialize_state)] Map<Mp, MpResolver>, #[serde(deserialize_state)] Map<UId, MpResolver>);
+pub struct Subst(#[serde(deserialize_state)] pub Map<Mp, MpResolver>, #[serde(deserialize_state)] pub Map<UId, MpResolver>);
 
 /* kernel/lazyconstr */
 
@@ -354,11 +372,20 @@ pub struct Subst(#[serde(deserialize_state)] Map<Mp, MpResolver>, #[serde(deseri
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub struct Substituted<T> {
-    #[serde(deserialize_state)] value: T,
-    #[serde(deserialize_state)] subst: List<Subst>,
+    /// NB: Value and subst are lazily initialized, and therefore may be modified mutably!  This
+    /// turns out to be fine as long as we are careful about how we do it; for now, we assume that
+    /// we'll always be able to access the substitution mutably when we want to modify it.
+    #[serde(deserialize_state)] pub value: T,
+    /// TODO: Verify there isn't significant sharing here.  Currently it seems like there usually
+    /// shouldn't be; the majority of the time, there should probably not be any substitutions here
+    /// at all.  If there are any, it seems like this may be a substitution generated during
+    /// typechecking--one which usually needs to be mutated later anyway--so it's probably okay to
+    /// copy it in that case.
+    #[serde(deserialize_state)] pub subst: OVec<Subst>,
 }
 
-pub type CstrSubst = Substituted<Constr>;
+/// We add an ORef here because it seems likely that the Constrs themselves are potentially shared.
+pub type CstrSubst = Substituted<ORef<Constr>>;
 
 // NB: Second constructor [Direct] isn't supposed to appear in a .vo
 #[derive(Debug, Clone, DeserializeState)]
@@ -396,7 +423,13 @@ pub enum CstType {
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum CstDef {
     OpaqueDef(#[serde(deserialize_state)] ORef<LazyConstr>),
-    Def(#[serde(deserialize_state)] ORef<CstrSubst>),
+    /// NB: From analyzing the OCaml, this isn't (shouldn't be?) actually shared by any operation
+    /// Coq performs, at least not for anything in the .vo (specifically: anything that assigns
+    /// a CstDef::Def to a Cb body always appears to create a unique CstrSubst).  So we hopefully
+    /// don't lose anything by using direct ownership here (the reason we want this is because
+    /// we'd like to mutate CstrSubst later, and it becomes inconvenient if it's inside an Rc
+    /// since we seemingly would need runtime borrow checking to make it work).
+    Def(#[serde(deserialize_state)] Box<CstrSubst>),
     Undef(Opt<Int>),
 }
 
@@ -428,10 +461,12 @@ pub struct TypingFlags {
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Cb {
     #[serde(deserialize_state)] hyps: SectionCtxt,
-    #[serde(deserialize_state)] body: CstDef,
+    /// Note that there may be some sharing of CstDefs (didn't check for all cases, only Def), but
+    /// we sacrifice it to obtain the possibility of interior mutability without RefCell.
+    #[serde(deserialize_state)] pub body: CstDef,
     #[serde(deserialize_state)] ty: CstType,
     #[serde(deserialize_state)] body_code: Any,
-    polymorphic: Bool,
+    pub polymorphic: Bool,
     #[serde(deserialize_state)] universes: Context,
     #[serde(deserialize_state)] pub proj: Opt<ProjBody>,
     inline_code: Bool,
@@ -555,21 +590,31 @@ pub enum Sfb {
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct StructureBody(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] ORef<Sfb>);
+/// Note: not sure whether Sfb can be shared or not, but we need it mutable to be able to modify
+/// Def in place.  TODO: Verify that there's not significant sharing here (there was an ORef
+/// previously, but that may have been a [mistaken] attempt to reduce space usage of variants).
+pub struct StructureBody(#[serde(deserialize_state)] Id, #[serde(deserialize_state)] Box<Sfb>);
 
-pub type Struc = List<StructureBody>;
+/// TODO: Verify that there's not significant sharing of StructureBody, since we'd like to have
+/// interior mutability here without runtime borrow checking, but we'd also like to not lose
+/// too much sharing (if possible).
+pub type Struc = OVec<StructureBody>;
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Sign {
-    MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] ORef<ModType>, #[serde(deserialize_state)] ORef<Sign>),
+    /// Note: not sure whether ModType or Sign can be shared or not, but we need them mutable to be
+    /// able to modify Def in place.  TODO: Verify that there's not significant sharing here.
+    MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] Box<ModType>, #[serde(deserialize_state)] Box<Sign>),
     NoFunctor(#[serde(deserialize_state)] Struc),
 }
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum MExpr {
-    MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] ORef<ModType>, #[serde(deserialize_state)] ORef<MExpr>),
+    /// Note: not sure whether ModType or Sign can be shared or not, but we need them mutable to be
+    /// able to modify Def in place.  TODO: Verify that there's not significant sharing here.
+    MoreFunctor(#[serde(deserialize_state)] UId, #[serde(deserialize_state)] Box<ModType>, #[serde(deserialize_state)] Box<MExpr>),
     NoFunctor(#[serde(deserialize_state)] Mae),
 }
 
@@ -760,9 +805,9 @@ let find_dyn name =
   try IntMap.find name !dyn_table
   with Not_found -> Any*/
 
-/* Some useful helper implementations */
+/// Some useful helper implementations
 
-// An iterator specialized to Lists.
+/// An iterator specialized to Lists.
 pub struct ListIter<'a, T> where T: 'a {
     node: &'a List<T>
 }
@@ -796,5 +841,70 @@ impl<'a, T> Iterator for ListIter<'a, T> {
 impl<T> List<T> {
     pub fn iter<'a>(&'a self) -> ListIter<'a, T> {
         ListIter::new(self)
+    }
+}
+
+/// An iterator specialized to OLists.
+pub struct OListIter<'a, T> where T: 'a {
+    node: &'a OList<T>,
+}
+
+impl<'a, T> OListIter<'a, T> {
+    fn new(node: &'a OList<T>) -> Self {
+        OListIter {
+            node: node,
+        }
+    }
+}
+
+impl<'a, T> Iterator for OListIter<'a, T> {
+    type Item = &'a T;
+
+    // Note: if there were a cycle (which there shouldn't be) in the original OList,
+    // this could loop forever.  But if used as intended (from a DeserializeSeed), this is unlikely
+    // to happen, since DeserializeSeed will already loop forever in that case...
+    fn next(&mut self) -> Option<&'a T> {
+        match *self.node {
+            OList::Cons(ref node) => {
+                let (ref v, ref next) = **node;
+                self.node = next;
+                return Some(v);
+            },
+            OList::Nil => None,
+        }
+    }
+}
+
+impl<T> OList<T> {
+    pub fn iter<'a>(&'a self) -> OListIter<'a, T> {
+        OListIter::new(self)
+    }
+}
+
+/// Owned vectors.
+impl<'de, T> serde::de::DeserializeState<'de, Seed<'de>> for OVec<T>
+    where T: Clone + 'static,
+          T: serde::de::DeserializeState<'de, Seed<'de>>,
+{
+    fn deserialize_state<'seed, D>(seed: &'seed mut Seed<'de>, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        // Lazy: we just deserialize the OList, then add everything to a Vec.
+        let olist: OList<T> = OList::deserialize_state(seed, deserializer)?;
+        Ok(OVec(olist.iter().map(T::clone).collect()))
+    }
+}
+
+impl<T> ::std::ops::Deref for OVec<T> {
+    type Target = Vec<T>;
+    fn deref(&self) -> &Vec<T> {
+        &self.0
+    }
+}
+
+impl<T> ::std::ops::DerefMut for OVec<T> {
+    fn deref_mut(&mut self) -> &mut Vec<T> {
+        &mut self.0
     }
 }
