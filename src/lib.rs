@@ -11,6 +11,7 @@ extern crate fixedbitset;
 #[macro_use] extern crate serde_derive_state;
 
 extern crate core;
+extern crate smallvec;
 extern crate vec_map;
 extern crate take_mut;
 extern crate typed_arena;

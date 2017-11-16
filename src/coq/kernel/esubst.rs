@@ -2,6 +2,7 @@ use std::borrow::{Borrow};
 use std::convert::{TryFrom};
 use std::num::{TryFromIntError};
 use std::option::{NoneError};
+use smallvec::{SmallVec};
 use core::nonzero::{NonZero, Zeroable};
 
 /*
@@ -85,6 +86,16 @@ impl Idx {
     }
 }
 
+/// We default to SmallVec of size 1 for now; not sure how big these usually get.
+/// Can easily change it to some other value if necessary; the point is to try to reduce the
+/// load on jemalloc (since we allocate almost nothing but Subs and ESubs vecs during reduction,
+/// outside of bump allocation in the term arena).
+///
+/// Note that currently, there's a tradeoff between how big we make this and how large our FTerms
+/// are, but that tradeoff isn't very fundamental since we could always allocate the SVec in an
+/// arena as well.
+type SVec<I> = SmallVec<[I; 1]>;
+
 /// Explicit substitutions of type [T], where I : Borrow<[T]>.
 ///
 /// NOTE: This differs from the OCaml's implementation because instead of representing
@@ -95,7 +106,7 @@ impl Idx {
 #[derive(Clone,Debug)]
 pub struct Subs<I> {
     /// Substitution operations (applied in order from right to left).
-    ops: Vec<Op<I>>,
+    ops: SVec<Op<I>>,
     /// ESID(n)             = %n END   bounded identity
     /// Note that this can be 0, not not negative.
     id: i32,
@@ -130,7 +141,7 @@ pub enum Expr<T> {
 // don't do much pointer chasing either).
 impl<I> Subs<I> {
     pub fn id(idx: Option<Idx>) -> Self {
-        Subs { ops: Vec::new(), id: match idx { Some(Idx(i)) => i, None => 0 } }
+        Subs { ops: SVec::new(), id: match idx { Some(Idx(i)) => i, None => 0 } }
     }
 
     fn push(&mut self, o: Op<I>) -> IdxResult<()> {
@@ -386,12 +397,12 @@ val is_lift_id : lift -> bool
     */
 #[derive(Debug,Clone)]
 pub struct Lift {
-    lifts: Vec<i32>,
+    lifts: SVec<i32>,
 }
 
 impl Lift {
     pub fn id() -> Self {
-        Lift { lifts: Vec::new(), }
+        Lift { lifts: SVec::new(), }
     }
 
     fn push(&mut self, o: i32) -> IdxResult<()> {
