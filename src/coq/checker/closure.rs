@@ -31,7 +31,7 @@ use std::rc::{Rc};
 use typed_arena::{Arena};
 use vec_map::{self, VecMap};
 
-type MRef<'b, T> = &'b ORef<T>;
+pub type MRef<'b, T> = &'b ORef<T>;
 
 /*
  * Five kinds of reductions:
@@ -136,19 +136,6 @@ pub type TableKeyC<'b> = TableKey<MRef<'b, PUniverses<Cst>>>;
 // TODO: Use custom KeyHash algorithm.
 struct KeyTable<'b, T>(HashMap<TableKeyC<'b>, T>);
 
-impl<'b, T> ::std::ops::Deref for KeyTable<'b, T> {
-    type Target = HashMap<TableKeyC<'b>, T>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<'b, T> ::std::ops::DerefMut for KeyTable<'b, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
 pub struct Infos<'a, 'b, 'g, T> where 'b: 'a, 'g: 'b, T: 'a {
   flags : Reds,
   // i_repr : 'a infos -> constr -> 'a;
@@ -156,112 +143,6 @@ pub struct Infos<'a, 'b, 'g, T> where 'b: 'a, 'g: 'b, T: 'a {
   // i_rels : int * (int * constr) list;
   rels: (Idx, VecMap<&'b mut Constr>),
   tab: &'a mut KeyTable<'b, T>,
-}
-
-impl<'b> Into<&'b Constr> for &'b mut Constr {
-    fn into(self) -> &'b Constr {
-        &*self
-    }
-}
-
-pub trait IRepr<'a, 'b> {
-    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
-        where T: Into<&'b Constr> + 'b,
-              T: Deref<Target=Constr>,
-              Self: Sized;
-}
-
-impl<'a, 'b> IRepr<'a, 'b> for FConstr<'a, 'b> {
-    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
-        where T: Into<&'b Constr> + 'b,
-              T: Deref<Target=Constr>,
-    {
-        let env = Subs::id(None);
-        env.mk_clos_raw(c, ctx)
-    }
-}
-
-impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
-    pub fn ref_value_cache<'r>(&'r mut self, rf: TableKeyC<'b>,
-                               ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>> {
-        Ok(Some(match self.tab.entry(rf) {
-            hash_map::Entry::Occupied(o) => o.into_mut(),
-            hash_map::Entry::Vacant(v) => {
-                match rf {
-                    TableKey::RelKey(n) => {
-                        let (s, ref mut l) = self.rels;
-                        if let Ok(Some(i)) = s.checked_sub(n) {
-                            // i is potentially valid, meaning positive i32.  Convert to i32,
-                            // subtract 1, and convert to usize (note: subtracting 1 just packs the
-                            // vector more tightly; it's not really that important, and we might
-                            // stop doing it if it turns out a Vec is a dumb structure here, which
-                            // is quite possible).
-                            // FIXME: Verify that 32 to usize is always a valid cast.
-                            let i = (u32::from(i) - 1) as usize;
-                            let (mut body, old) = if let vec_map::Entry::Occupied(mut o) =
-                                                         l.entry(i) {
-                                let c = o.get().lift(n)?;
-                                // One weird trick to keep your lifetimes in order!
-                                // We remove body from rels; if there's a panic here and we catch
-                                // it before rels goes away, it will be incorrect (proper
-                                // UnwindSafe usage will make this a nonissue, but if we care, we
-                                // can either use take_mut or add a catch_panic here to fix body
-                                // back up).  In the absence of panics, once this block ends nobody
-                                // will ever try to look up this entry directly in i_rels again,
-                                // since ref_value_cache is the only thing that does so and it will
-                                // always take the entry in the outer hash table if it's present;
-                                // therefore, the removal here is fine.
-                                let mut body: &'b mut Constr = o.remove();
-                                let mut old = mem::replace(body, c);
-                                (body, old)
-                            } else {
-                                // Rel is a free variable without a body.
-                                return Ok(None);
-                            };
-
-                            // We do this dance to ensure that we keep rels the same if there
-                            // was a (non-panic) error.  Obviously if there's a panic during
-                            // VecMap insertion, this will not work out, but that shouldn't be
-                            // an issue given how VecMap is implemented (in particular, it
-                            // shouldn't shrink after remove is run, so it should still have
-                            // space for i).
-                            //
-                            // Note that unlike inserting into a vacant HashMap entry or
-                            // reinserting the old VecMap entry (neither of which should panic
-                            // in practice), there is actually a chance that i_repr panics
-                            // here.  To be on the safe side, maybe we should catch_panic
-                            // here (which take_mut would also do for safety reasons).
-                            match T::i_repr(body, ctx) {
-                                Ok(c) => v.insert(c),
-                                Err((e, body)) => {
-                                    mem::replace(body, old);
-                                    l.insert(i, body);
-                                    return Err(e)
-                                },
-                            }
-                            // As mentioned above, this insert shouldn't panic in practice,
-                            // because space for the entry was already reserved.
-                        } else {
-                            // n would definitely be invalid if it were 0 or negative, (it
-                            // wasn't actually a free variable at all), so we know it can't
-                            // have a body.
-                            return Ok(None);
-                        }
-                    },
-                    // | VarKey(id) => raise Not_found
-                    TableKey::ConstKey(cst) => {
-                        if let Some(Ok(body)) = self.env.constant_value(cst) {
-                            v.insert(T::i_repr(body, ctx).map_err( |(e, _)| e)?)
-                        } else {
-                            // We either encountered a lookup error, or cst was not an
-                            // evaluable constant; in either case, we can't return a body.
-                            return Ok(None);
-                        }
-                    },
-                }
-            },
-        }))
-    }
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -362,6 +243,129 @@ enum Application<T> {
     /// Arguments are partially applied; this is the corresponding thunk.
     Partial(T),
 }
+
+/// cache of constants: the body is computed only when needed.
+pub type ClosInfos<'a, 'b, 'g> = Infos<'a, 'b, 'g, FConstr<'a, 'b>>;
+
+pub trait IRepr<'a, 'b> {
+    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
+        where T: Into<&'b Constr> + 'b,
+              T: Deref<Target=Constr>,
+              Self: Sized;
+}
+
+impl<'b, T> ::std::ops::Deref for KeyTable<'b, T> {
+    type Target = HashMap<TableKeyC<'b>, T>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'b, T> ::std::ops::DerefMut for KeyTable<'b, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<'b> Into<&'b Constr> for &'b mut Constr {
+    fn into(self) -> &'b Constr {
+        &*self
+    }
+}
+
+impl<'a, 'b> IRepr<'a, 'b> for FConstr<'a, 'b> {
+    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
+        where T: Into<&'b Constr> + 'b,
+              T: Deref<Target=Constr>,
+    {
+        let env = Subs::id(None);
+        env.mk_clos_raw(c, ctx)
+    }
+}
+
+impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
+    pub fn ref_value_cache<'r>(&'r mut self, rf: TableKeyC<'b>,
+                               ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>> {
+        Ok(Some(match self.tab.entry(rf) {
+            hash_map::Entry::Occupied(o) => o.into_mut(),
+            hash_map::Entry::Vacant(v) => {
+                match rf {
+                    TableKey::RelKey(n) => {
+                        let (s, ref mut l) = self.rels;
+                        if let Ok(Some(i)) = s.checked_sub(n) {
+                            // i is potentially valid, meaning positive i32.  Convert to i32,
+                            // subtract 1, and convert to usize (note: subtracting 1 just packs the
+                            // vector more tightly; it's not really that important, and we might
+                            // stop doing it if it turns out a Vec is a dumb structure here, which
+                            // is quite possible).
+                            // FIXME: Verify that 32 to usize is always a valid cast.
+                            let i = (u32::from(i) - 1) as usize;
+                            let (mut body, old) = if let vec_map::Entry::Occupied(mut o) =
+                                                         l.entry(i) {
+                                let c = o.get().lift(n)?;
+                                // One weird trick to keep your lifetimes in order!
+                                // We remove body from rels; if there's a panic here and we catch
+                                // it before rels goes away, it will be incorrect (proper
+                                // UnwindSafe usage will make this a nonissue, but if we care, we
+                                // can either use take_mut or add a catch_panic here to fix body
+                                // back up).  In the absence of panics, once this block ends nobody
+                                // will ever try to look up this entry directly in i_rels again,
+                                // since ref_value_cache is the only thing that does so and it will
+                                // always take the entry in the outer hash table if it's present;
+                                // therefore, the removal here is fine.
+                                let mut body: &'b mut Constr = o.remove();
+                                let mut old = mem::replace(body, c);
+                                (body, old)
+                            } else {
+                                // Rel is a free variable without a body.
+                                return Ok(None);
+                            };
+
+                            // We do this dance to ensure that we keep rels the same if there
+                            // was a (non-panic) error.  Obviously if there's a panic during
+                            // VecMap insertion, this will not work out, but that shouldn't be
+                            // an issue given how VecMap is implemented (in particular, it
+                            // shouldn't shrink after remove is run, so it should still have
+                            // space for i).
+                            //
+                            // Note that unlike inserting into a vacant HashMap entry or
+                            // reinserting the old VecMap entry (neither of which should panic
+                            // in practice), there is actually a chance that i_repr panics
+                            // here.  To be on the safe side, maybe we should catch_panic
+                            // here (which take_mut would also do for safety reasons).
+                            match T::i_repr(body, ctx) {
+                                Ok(c) => v.insert(c),
+                                Err((e, body)) => {
+                                    mem::replace(body, old);
+                                    l.insert(i, body);
+                                    return Err(e)
+                                },
+                            }
+                            // As mentioned above, this insert shouldn't panic in practice,
+                            // because space for the entry was already reserved.
+                        } else {
+                            // n would definitely be invalid if it were 0 or negative, (it
+                            // wasn't actually a free variable at all), so we know it can't
+                            // have a body.
+                            return Ok(None);
+                        }
+                    },
+                    // | VarKey(id) => raise Not_found
+                    TableKey::ConstKey(cst) => {
+                        if let Some(Ok(body)) = self.env.constant_value(cst) {
+                            v.insert(T::i_repr(body, ctx).map_err( |(e, _)| e)?)
+                        } else {
+                            // We either encountered a lookup error, or cst was not an
+                            // evaluable constant; in either case, we can't return a body.
+                            return Ok(None);
+                        }
+                    },
+                }
+            },
+        }))
+    }
+}
+
 
 impl RedState {
     fn neutr(&self) -> Self {
@@ -732,7 +736,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     // FIXME: This seems like a very weird and convoluted way to do this.
                     let mut v = vec![m.into_owned()];
                     m = Cow::Owned(fx);
-                    stk.append(v)?;
+                    stk.append(v);
                     // mem::swap(stk, &mut par);
                     // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
                     // actually at the end of the Vec.  Therefore, where in the OCaml we perform
@@ -1027,17 +1031,16 @@ impl<'a, 'b, I, S> ::std::ops::DerefMut for Stack<'a, 'b, I, S> {
 }
 
 impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
-    fn push(&mut self, o: StackMember<'a, 'b, I, S>) -> IdxResult<()> {
+    fn push(&mut self, o: StackMember<'a, 'b, I, S>) {
         self.0.push(o);
-        Ok(())
     }
 
-    pub fn append(&mut self, mut v: Vec<FConstr<'a, 'b>>) -> IdxResult<()> {
-        if v.len() == 0 { return Ok(()) }
+    pub fn append(&mut self, mut v: Vec<FConstr<'a, 'b>>) {
+        if v.len() == 0 { return }
         if let Some(&mut StackMember::App(ref mut l)) = self.last_mut() {
             mem::swap(&mut v, l);
             l.extend(v.into_iter());
-            return Ok(())
+            return
         }
         self.push(StackMember::App(v))
     }
@@ -1047,7 +1050,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
             *k = k.checked_add(n)?;
             return Ok(())
         }
-        self.push(StackMember::Shift(n, s))
+        Ok(self.push(StackMember::Shift(n, s)))
     }
 
     // since the head may be reducible, we might introduce lifts of 0
@@ -1094,7 +1097,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
             // const LOCKED: &'static FTerm<'static> = &FTerm::Locked;
             self.compact(&m, ctx)?;
             m.term.set(None);
-            self.push(StackMember::Update(m, i))
+            Ok(self.push(StackMember::Update(m, i)))
         } else { Ok(()) }
     }
 
@@ -1115,7 +1118,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::Shift(k, s) => {
-                    rstk.push(StackMember::Shift(k, s))?;
+                    rstk.push(StackMember::Shift(k, s));
                     head = head.lft(k, ctx)?;
                     depth = match depth {
                         None => Some(k),
@@ -1123,7 +1126,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                     };
                 },
                 StackMember::App(args) => {
-                    rstk.push(StackMember::App(args.clone() /* expensive */))?;
+                    rstk.push(StackMember::App(args.clone() /* expensive */));
                     let h = head.clone();
                     head.term = Cell::new(Some(ctx.term_arena.alloc(FTerm::App(h, args))));
                 },
@@ -1159,7 +1162,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::Shift(k, s) => {
-                    rstk.push(StackMember::Shift(k, s))?;
+                    rstk.push(StackMember::Shift(k, s));
                     head = head.lft(k, ctx)?;
                 },
                 StackMember::App(args) => {
@@ -1169,7 +1172,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                         // assert here, given that we check below to make sure we don't push onto
                         // rstk if n = 0?  Otherwise, should we add similar logic to the below to
                         // avoid pushing an empty arg stack?
-                        rstk.push(StackMember::App(args.clone() /* expensive */))?;
+                        rstk.push(StackMember::App(args.clone() /* expensive */));
                         let h = head.clone();
                         head.term = Cell::new(Some(ctx.term_arena.alloc(FTerm::App(h, args))));
                         // Safe because n >= q
@@ -1185,10 +1188,10 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                         let aft = args[n+1..].to_vec(); // expensive
                         // n = bef.len()
                         if n > 0 {
-                            rstk.push(StackMember::App(bef))?;
+                            rstk.push(StackMember::App(bef));
                         }
                         rstk.reverse();
-                        self.append(aft)?;
+                        self.append(aft);
                         return Ok(Some((rstk, arg)))
                     }
                 },
@@ -1259,7 +1262,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                         // Safe because n ≤ na ≤ l.len() (n < na, actually, so eargs will be
                         // nonempty).
                         let eargs = l[n..na].to_vec(); // expensive
-                        self.push(StackMember::App(eargs))?;
+                        self.push(StackMember::App(eargs));
                         return Ok(Application::Full(e))
                     } else {
                         // More lambdas
@@ -1287,7 +1290,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
 
 impl<'a, 'b, I> Stack<'a, 'b, I, ()> { */
     /// Eta expansion: add a reference to implicit surrounding lambda at end of stack
-    pub fn eta_expand_stack(&mut self, ctx: &'a Context<'a, 'b>, s: S) -> IdxResult<()> {
+    pub fn eta_expand_stack(&mut self, ctx: &'a Context<'a, 'b>, s: S) {
         // FIXME: Given that we want to do this, seriously consider using a VecDeque rather than a
         // stack.  That would make this operation O(1).  The only potential downside would be less
         // easy slicing, but that might not matter too much if we do things correctly (as_slices is
@@ -1298,10 +1301,9 @@ impl<'a, 'b, I> Stack<'a, 'b, I, ()> { */
             norm: Cell::new(RedState::Norm),
             term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(Idx::ONE)))),
         }];
-        self.push(StackMember::App(app))?;
-        self.push(StackMember::Shift(Idx::ONE, s))?;
+        self.push(StackMember::App(app));
+        self.push(StackMember::Shift(Idx::ONE, s));
         self.reverse();
-        Ok(())
     }
 /* }
 
@@ -1389,7 +1391,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             // FIXME: If we made FLambdas point into slices, this silly allocation
                             // would not be necessary (note to self: is this actually true?).
                             let aft = args[n..].to_vec(); // expensive
-                            self.append(aft)?;
+                            self.append(aft);
                         }
                         self.reloc_rargs(depth, ctx)?;
                         return Ok(());
@@ -1533,13 +1535,13 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         match *t {
                             Constr::App(ref o) => {
                                 let (ref a, ref b) = **o;
-                                self.append(e.mk_clos_vect(b, ctx)?)?;
+                                self.append(e.mk_clos_vect(b, ctx)?);
                                 t = a;
                             },
                             Constr::Case(ref o) => {
                                 let (_, _, ref a, _) = **o;
                                 self.push(StackMember::CaseT(o, e.clone() /* expensive */,
-                                                             i.clone()))?;
+                                                             i.clone()));
                                 t = a;
                             },
                             Constr::Fix(_) => { // laziness
@@ -1577,7 +1579,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         // shared, right?
                         self.update(m, i.clone(), ctx)?;
                     }
-                    self.append(b.clone() /* expensive */)?;
+                    self.append(b.clone() /* expensive */);
                     m = Cow::Borrowed(a);
                 },
                 FTerm::Case(o, ref p, ref t, ref br) => {
@@ -1587,7 +1589,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         self.update(m, i.clone(), ctx)?;
                     }
                     self.push(StackMember::Case(o, p.clone(), br.clone() /* expensive */,
-                                                i.clone()))?;
+                                                i.clone()));
                     m = Cow::Borrowed(t);
                 },
                 FTerm::CaseT(o, ref t, ref env) => {
@@ -1596,7 +1598,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         // shared, right?
                         self.update(m, i.clone(), ctx)?;
                     }
-                    self.push(StackMember::CaseT(o, env.clone() /* expensive */, i.clone()))?;
+                    self.push(StackMember::CaseT(o, env.clone() /* expensive */, i.clone()));
                     m = Cow::Borrowed(t);
                 },
                 FTerm::Fix(o, n, _) => {
@@ -1611,7 +1613,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     let m_ = m.into_owned();
                     match self.get_nth_arg(m_.clone(), n, ctx)? {
                         Some((pars, arg)) => {
-                            self.push(StackMember::Fix(m_, pars, i.clone()))?;
+                            self.push(StackMember::Fix(m_, pars, i.clone()));
                             m = Cow::Owned(arg);
                         },
                         None => return Ok(m_),
@@ -1639,7 +1641,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         // point during typechecking.
                         let npars = usize::try_from(pb.npars).map_err(IdxError::from)?;
                         let arg = usize::try_from(pb.arg).map_err(IdxError::from)?;
-                        self.push(StackMember::Proj(npars, arg, p, b, i.clone()))?;
+                        self.push(StackMember::Proj(npars, arg, p, b, i.clone()));
                         m = Cow::Borrowed(c);
                     } else {
                         return Ok(m.into_owned())
@@ -1667,13 +1669,13 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
             match *t {
                 Constr::App(ref o) => {
                     let (ref a, ref b) = **o;
-                    self.append(env.mk_clos_vect(b, ctx)?)?;
+                    self.append(env.mk_clos_vect(b, ctx)?);
                     t = a;
                 },
                 Constr::Case(ref o) => {
                     let (_, _, ref a, _) = **o;
                     self.push(StackMember::CaseT(o, env.clone() /* expensive */,
-                                                 i.clone()))?;
+                                                 i.clone()));
                     t = a;
                 },
                 Constr::Fix(_) => { // laziness
@@ -1786,7 +1788,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         StackMember::Fix(fx, par, i) => {
                             let rarg = m.fapp_stack(&mut args, ctx)?;
                             // makes a Vec, but not that expensive.
-                            self.append(vec![rarg])?;
+                            self.append(vec![rarg]);
                             self.extend(par.0.into_iter());
                             let (fxe, fxbd) = fx.fterm()
                                 .expect("Tried to lift a locked term")
@@ -2048,6 +2050,3 @@ impl Constr {
         Constr::of_fconstr_lift(v, &lfts, ctx)
     }
 }
-
-/// cache of constants: the body is computed only when needed.
-pub type ClosInfos<'a, 'b, 'g> = Infos<'a, 'b, 'g, FConstr<'a, 'b>>;
