@@ -463,6 +463,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
     }
 
     /// The inverse of mk_clos_deep: move back to constr
+    /// Note: self must be typechecked beforehand!
     fn to_constr<F>(&self, constr_fun: F, lfts: &Lift,
                     ctx: &'a Context<'a, 'b>) -> IdxResult<Constr>
         where F: Fn(&FConstr<'a, 'b>, &Lift, &'a Context<'a, 'b>) -> IdxResult<Constr>,
@@ -772,6 +773,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
 
     /// Weak reduction
     /// [whd_val] is for weak head normalization
+    /// Note: self must be typechecked beforehand!
     pub fn whd_val<'r, 'g>(self, info: &mut ClosInfos<'a, 'b, 'g>,
                            ctx: &'a Context<'a, 'b>) -> RedResult<Constr> {
         let mut stk = Stack(Vec::new());
@@ -905,6 +907,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     /// function is parameterized by the function to apply on the direct
     /// subterms.
     /// Could be used insted of mk_clos.
+    /// Note: t must be typechecked beforehand!
     pub fn mk_clos_deep<F>(&self, clos_fun: F, t: &'b Constr,
                            ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>
         where F: Fn(&Subs<FConstr<'a, 'b>>,
@@ -1025,6 +1028,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     }
 
     /// A better mk_clos?
+    /// Note: t must be typechecked beforehand!
     fn mk_clos2(&self, t: &'b Constr,
                 ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         self.mk_clos_deep((Subs::<FConstr>::mk_clos), t, ctx)
@@ -1882,6 +1886,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
 
     /// [whd_stack] performs weak head normalization in a given stack. It
     /// stops whenever a reduction is blocked.
+    /// Note: v must be typechecked beforehand!
     pub fn whd_stack<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, v: FConstr<'a, 'b>,
                              ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
         where S: Clone, I: Clone,
@@ -2002,6 +2007,7 @@ impl<'a, 'b> FTerm<'a, 'b> {
 }
 
 impl Constr {
+    /// Note: v must be typechecked beforehand!
     fn of_fconstr_lift<'a, 'b>(v: &FConstr<'a, 'b>, lfts: &Lift,
                            ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
         // In general, it might be nice to make this function tail recursive (by using an explicit
@@ -2079,6 +2085,7 @@ impl Constr {
     /// fconstr. When we find a closure whose substitution is the identity,
     /// then we directly return the constr to avoid possibly huge
     /// reallocation.
+    /// Note: v must be typechecked beforehand!
     pub fn of_fconstr<'a, 'b>(v: &FConstr<'a, 'b>,
                               ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
         let lfts = Lift::id();
