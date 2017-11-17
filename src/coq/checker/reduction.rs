@@ -1,9 +1,16 @@
 use coq::checker::closure::{
     Context,
     FConstr,
+    Infos,
     MRef,
+    RedResult,
+    Reds,
     Stack,
     StackMember,
+};
+use coq::checker::environ::{
+    Env,
+    Globals,
 };
 use coq::kernel::esubst::{
     Idx,
@@ -18,6 +25,7 @@ use ocaml::values::{
     Constr,
     Cst,
 };
+use std::iter;
 use std::mem;
 
 /// lft_constr_stack_elt
@@ -175,5 +183,63 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
             }
         }
         return Ok(stk)
+    }
+}
+
+impl Constr {
+    /// Reduction functions
+
+    /// Note: self must be type-checked beforehand!
+    pub fn whd_betaiotazeta(self) -> RedResult<Constr> {
+        match self {
+            Constr::Sort(_) | /* Constr::Var(_) | Constr::Meta(_) | Constr::Evar(_) |*/
+            Constr::Const(_) | Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) |
+            Constr::Lambda(_) | Constr::Fix(_) | Constr::CoFix(_) => Ok(self),
+            _ => {
+                let mut globals = Globals::default();
+                let ref ctx = Context::new();
+                let mut infos = Infos::create(Reds::BETAIOTAZETA, &mut globals, iter::empty())?;
+                let v = self.inject(ctx)?;
+                v.whd_val(&mut infos, ctx)
+            }
+        }
+    }
+
+    /// Note: self must be type-checked beforehand!
+    pub fn whd_all<'b, 'g>(self, env: &mut Env<'b, 'g>) -> RedResult<Constr>
+        where 'g: 'b,
+    {
+        match self {
+            Constr::Sort(_) | /* Constr::Meta(_) | Constr::Evar(_) |*/
+            Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) | Constr::Lambda(_) |
+            Constr::Fix(_) | Constr::CoFix(_) => Ok(self),
+            _ => {
+                let Env { ref mut globals, ref mut rel_context } = *env;
+                let ref ctx = Context::new();
+                let mut infos = Infos::create(Reds::BETADELTAIOTA, globals,
+                                              rel_context.iter_mut())?;
+                let v = self.inject(ctx)?;
+                v.whd_val(&mut infos, ctx)
+            }
+        }
+    }
+
+    /// Note: self must be type-checked beforehand!
+    pub fn whd_allnolet<'b, 'g>(self, env: &mut Env<'b, 'g>) -> RedResult<Constr>
+        where 'g: 'b,
+    {
+        match self {
+            Constr::Sort(_) | /* Constr::Meta(_) | Constr::Evar(_) |*/
+            Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) | Constr::Lambda(_) |
+            Constr::Fix(_) | Constr::CoFix(_) | Constr::LetIn(_) => Ok(self),
+            _ => {
+                let Env { ref mut globals, ref mut rel_context } = *env;
+                let ref ctx = Context::new();
+                let mut infos = Infos::create(Reds::BETADELTAIOTANOLET, globals,
+                                              rel_context.iter_mut())?;
+                let v = self.inject(ctx)?;
+                v.whd_val(&mut infos, ctx)
+            }
+        }
     }
 }

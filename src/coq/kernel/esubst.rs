@@ -2,7 +2,7 @@ use std::borrow::{Borrow};
 use std::convert::{TryFrom};
 use std::num::{TryFromIntError};
 use std::option::{NoneError};
-use smallvec::{SmallVec};
+// use smallvec::{SmallVec};
 use core::nonzero::{NonZero, Zeroable};
 
 /*
@@ -94,7 +94,13 @@ impl Idx {
 /// Note that currently, there's a tradeoff between how big we make this and how large our FTerms
 /// are, but that tradeoff isn't very fundamental since we could always allocate the SVec in an
 /// arena as well.
-type SVec<I> = SmallVec<[I; 1]>;
+///
+/// UPDATED: For this to work, because of the way we're using arenas, we'd need SmallVec to
+/// implement #[may_dangle] on T.  This would probably require a somewhat substantial rewrite of
+/// SmallVec, though, in order to be safe (for instance, proper use of PhantomData).  So it's
+/// deferred for the moment.  May be addressed later.
+// type SVec<I> = SVec<[I; 1]>;
+type SVec<I> = Vec<I>;
 
 /// Explicit substitutions of type [T], where I : Borrow<[T]>.
 ///

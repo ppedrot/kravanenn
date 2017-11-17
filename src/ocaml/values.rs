@@ -807,7 +807,7 @@ let find_dyn name =
 
 /// Some useful helper implementations
 
-/// An iterator specialized to Lists.
+/// Iterators specialized to Lists.
 pub struct ListIter<'a, T> where T: 'a {
     node: &'a List<T>
 }

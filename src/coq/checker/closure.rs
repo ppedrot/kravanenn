@@ -63,18 +63,6 @@ pub enum RedError {
     NotFound,
 }
 
-impl ::std::convert::From<IdxError> for Box<RedError> {
-    fn from(e: IdxError) -> Self {
-        Box::new(RedError::Idx(e))
-    }
-}
-
-impl ::std::convert::From<EnvError> for Box<RedError> {
-    fn from(e: EnvError) -> Self {
-        Box::new(RedError::Env(e))
-    }
-}
-
 // We box the Error to shrink the Result size.
 pub type RedResult<T> = Result<T, Box<RedError>>;
 
@@ -253,6 +241,27 @@ pub trait IRepr<'a, 'b> {
         where T: Into<&'b Constr> + 'b,
               T: Deref<Target=Constr>,
               Self: Sized;
+}
+
+impl ::std::convert::From<IdxError> for Box<RedError> {
+    fn from(e: IdxError) -> Self {
+        Box::new(RedError::Idx(e))
+    }
+}
+
+impl ::std::convert::From<EnvError> for Box<RedError> {
+    fn from(e: EnvError) -> Self {
+        Box::new(RedError::Env(e))
+    }
+}
+
+impl<'a, 'b> Context<'a, 'b> {
+    pub fn new() -> Self {
+        Context {
+            // (8 * 2^20, just an arbitrary number to start with).
+            term_arena: Arena::with_capacity(0x800000),
+        }
+    }
 }
 
 impl<'b, T> ::std::ops::Deref for KeyTable<'b, T> {
@@ -2090,6 +2099,12 @@ impl Constr {
                               ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
         let lfts = Lift::id();
         Constr::of_fconstr_lift(v, &lfts, ctx)
+    }
+
+    pub fn inject<'a, 'b>(&'b self, ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>
+    {
+        let env = Subs::id(None);
+        env.mk_clos(self, ctx)
     }
 }
 

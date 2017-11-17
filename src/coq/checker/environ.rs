@@ -22,6 +22,7 @@ use ocaml::values::{
     ProjBody,
     PUniverses,
     // Rctxt,
+    RDecl,
     // VoDigest,
 };
 use take_mut;
@@ -46,6 +47,7 @@ enum LazyRef<'a, T> where T: 'a {
 
 /// Environments
 
+#[derive(Default)]
 pub struct Globals<'g> {
     /// Invariant: always LazyRef::Owned until constant_value is called for the first time.
     /// (never inserted as LazyRef::Borrowed)
@@ -66,10 +68,12 @@ pub struct Env<'b, 'g> where 'g: 'b {
     /// rel_context.  We want to divorce the rel_context lifetimes from the global lifetimes
     /// so we can drop the Env without unifying the lifetime of the globals with it.
     pub globals: &'b mut Globals<'g>,
-    // /// NOTE: We will probably make this something we clone somewhat regularly, since we often
-    // /// want to keep the rest of the Env the same but mutate the Rctxt.  So we might make this
-    // /// into a &'r mut Rctx<'b> or something.
-    // rel_context: &'b mut Rctx
+    /// NOTE: We will probably make this something we clone somewhat regularly, since we often
+    /// want to keep the rest of the Env the same but mutate the Rctxt.  So we might make this
+    /// into a &'r mut Rctx<'b> or something.
+    /// NOTE: We currently use Vec<RDecl> instead of RCtxt, just because it's somewhat easier
+    /// to deal with.  We can always change it later.
+    pub rel_context: &'b mut Vec<RDecl>,
     // stratification: Stratification,
     // imports: MpMap<VoDigest>,
 }
