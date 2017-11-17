@@ -152,7 +152,7 @@ pub struct Ind {
     #[serde(deserialize_state)] pub name: Cst,
     /// The position of the inductive type within the block of mutually-recursive types.
     /// Beware: indexing starts from 0.
-    pos: Int,
+    pub pos: Int,
 }
 
 /// Designation of a (particular) constructor of a (particular) inductive type.

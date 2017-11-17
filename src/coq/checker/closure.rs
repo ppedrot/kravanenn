@@ -1,4 +1,4 @@
-use coq::checker::environ::{Env, EnvError};
+use coq::checker::environ::{EnvError, Globals};
 use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, Lift, SubsV as Subs};
 use core::convert::{TryFrom};
 use core::nonzero::{NonZero};
@@ -19,6 +19,7 @@ use ocaml::values::{
     PRec,
     Proj,
     PUniverses,
+    RDecl,
     RecordBody,
 };
 use std::borrow::{Cow};
@@ -139,10 +140,10 @@ struct KeyTable<'b, T>(HashMap<TableKeyC<'b>, T>);
 pub struct Infos<'a, 'b, 'g, T> where 'b: 'a, 'g: 'b, T: 'a {
   flags : Reds,
   // i_repr : 'a infos -> constr -> 'a;
-  env: &'a mut Env<'b, 'g>,
+  globals: &'a mut Globals<'g>,
   // i_rels : int * (int * constr) list;
-  rels: (Idx, VecMap<&'b mut Constr>),
-  tab: &'a mut KeyTable<'b, T>,
+  rels: (u32, VecMap<&'b mut Constr>),
+  tab: KeyTable<'b, T>,
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -292,14 +293,12 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
                 match rf {
                     TableKey::RelKey(n) => {
                         let (s, ref mut l) = self.rels;
-                        if let Ok(Some(i)) = s.checked_sub(n) {
-                            // i is potentially valid, meaning positive i32.  Convert to i32,
-                            // subtract 1, and convert to usize (note: subtracting 1 just packs the
-                            // vector more tightly; it's not really that important, and we might
-                            // stop doing it if it turns out a Vec is a dumb structure here, which
-                            // is quite possible).
-                            // FIXME: Verify that 32 to usize is always a valid cast.
-                            let i = (u32::from(i) - 1) as usize;
+                        if let Some(i) = s.checked_sub(u32::from(n)) {
+                            // i is potentially valid, meaning u32 (note that n is a length, not an
+                            // Idx, so 0 is a valid index; also note that since n was a positive
+                            // u32, we know i < s).
+                            // FIXME: Verify that u32 to usize is always a valid cast.
+                            let i = i as usize;
                             let (mut body, old) = if let vec_map::Entry::Occupied(mut o) =
                                                          l.entry(i) {
                                 let c = o.get().lift(n)?;
@@ -344,15 +343,14 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
                             // As mentioned above, this insert shouldn't panic in practice,
                             // because space for the entry was already reserved.
                         } else {
-                            // n would definitely be invalid if it were 0 or negative, (it
-                            // wasn't actually a free variable at all), so we know it can't
-                            // have a body.
+                            // n would definitely be invalid if it were negative, (it wasn't
+                            // actually a free variable at all), so we know it can't have a body.
                             return Ok(None);
                         }
                     },
                     // | VarKey(id) => raise Not_found
                     TableKey::ConstKey(cst) => {
-                        if let Some(Ok(body)) = self.env.constant_value(cst) {
+                        if let Some(Ok(body)) = self.globals.constant_value(cst) {
                             v.insert(T::i_repr(body, ctx).map_err( |(e, _)| e)?)
                         } else {
                             // We either encountered a lookup error, or cst was not an
@@ -363,6 +361,11 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
                 }
             },
         }))
+    }
+
+    pub fn unfold_reference<'r>(&'r mut self, rf: TableKeyC<'b>,
+                                ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>> {
+        self.ref_value_cache(rf, ctx)
     }
 }
 
@@ -764,6 +767,17 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         self.zip(stk, ctx)
     }
+
+    /// Initialization and then normalization
+
+    /// Weak reduction
+    /// [whd_val] is for weak head normalization
+    pub fn whd_val<'r, 'g>(self, info: &mut ClosInfos<'a, 'b, 'g>,
+                           ctx: &'a Context<'a, 'b>) -> RedResult<Constr> {
+        let mut stk = Stack(Vec::new());
+        let ft = stk.kh(info, self, ctx, (), ())?;
+        Ok(Constr::of_fconstr(&ft, ctx)?)
+    }
 }
 
 impl<'a, 'b> Subs<FConstr<'a, 'b>> {
@@ -1113,7 +1127,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
         assert!(head.norm.get() != RedState::Red);
-        let mut rstk = Stack(Vec::new());
+        let mut rstk = Stack(Vec::with_capacity(self.len()));
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
@@ -1158,7 +1172,7 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
         assert!(head.norm.get() != RedState::Red);
-        let mut rstk = Stack(Vec::new());
+        let mut rstk = Stack(Vec::with_capacity(self.len()));
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::Shift(k, s) => {
@@ -1448,15 +1462,16 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         (* strip_update_shift_app only produces Zapp and Zshift items *) */
 
     /// Must be called on a type-checked term.
-    pub fn eta_expand_ind_stack<'g>(env: &Env<'b, 'g>,
+    pub fn eta_expand_ind_stack<'g>(globals: &Globals<'g>,
                                     ind: &'b Ind,
                                     m: FConstr<'a, 'b>,
                                     s: &mut Stack<'a, 'b, I, S>,
                                     (f, s_): (FConstr<'a, 'b>, &mut Stack<'a, 'b, I, S>),
                                     ctx: &'a Context<'a, 'b>) ->
         RedResult<(Stack<'a, 'b, I, S>, Stack<'a, 'b, I, S>)>
+        where 'g: 'b,
     {
-        let mib = env.lookup_mind(&ind.name).ok_or(RedError::NotFound)?;
+        let mib = globals.lookup_mind(&ind.name).ok_or(RedError::NotFound)?;
         match mib.record {
             Some(Some(RecordBody(_, ref projs, _))) if mib.finite != Finite::CoFinite => {
                 // (Construct, pars1 .. parsm :: arg1...argn :: []) ~= (f, s') ->
@@ -1630,8 +1645,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         // error, especially since the env can presumably be mutated after
                         // typechecking.  So I'm choosing not to panic on either lookup failure or
                         // not finding a projection.  I'm open to changing this!
-                        let pb = info.env.lookup_projection(p)
-                                         .ok_or(RedError::NotFound)??;
+                        let pb = info.globals.lookup_projection(p)
+                                             .ok_or(RedError::NotFound)??;
                         if let Cow::Borrowed(m) = m {
                             // NOTE: We probably only want to bother updating this reference if
                             // it's shared, right?
@@ -1855,6 +1870,26 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         let hm = self.knh(info, m, ctx, i.clone(), s.clone())?;
         self.knr(info, hm, ctx, i, s)
     }
+
+    fn kh<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, v: FConstr<'a, 'b>,
+                  ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+        where S: Clone, I: Clone,
+    {
+        Ok(self.kni(info, v, ctx, i, s)?
+               .fapp_stack(self, ctx)?)
+    }
+
+
+    /// [whd_stack] performs weak head normalization in a given stack. It
+    /// stops whenever a reduction is blocked.
+    pub fn whd_stack<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, v: FConstr<'a, 'b>,
+                             ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+        where S: Clone, I: Clone,
+    {
+        let k = self.kni(info, v, ctx, i, s)?;
+        k.fapp_stack(self, ctx)?; // to unlock Zupdates!
+        Ok(k)
+    }
 }
 
 impl<'a, 'b> FTerm<'a, 'b> {
@@ -2048,5 +2083,49 @@ impl Constr {
                               ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
         let lfts = Lift::id();
         Constr::of_fconstr_lift(v, &lfts, ctx)
+    }
+}
+
+impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> {
+    fn defined_rels<I>(rel_context: I) -> IdxResult<(u32, VecMap<&'b mut Constr>)>
+        where I: Iterator<Item=&'b mut RDecl>
+    {
+        let mut i = 0u32;
+        // TODO: If we had an ExactSizeIterator or something, we would be able to know we were in
+        // bounds for usize the entire time and wait to check for u32 overflow until the end.
+        let rels: Result<VecMap<_>, _> = rel_context
+            .filter_map( |decl| {
+                let res = match *decl {
+                    RDecl::LocalAssum(_, _) => None,
+                    // FIXME: Verify that u32 to usize is always a valid cast.
+                    RDecl::LocalDef(_, ref mut body, _) => Some(Ok((i as usize, body))),
+                };
+                i = match i.checked_add(1) {
+                    Some(i) => i,
+                    None => return Some(Err(IdxError::from(NoneError))),
+                };
+                res
+            }).collect();
+        Ok((i, rels?))
+    }
+
+    pub fn mind_equiv(&self, ind1: &Ind, ind2: &Ind) -> bool {
+        self.globals.mind_equiv(ind1, ind2)
+    }
+
+    pub fn create<I>(flgs: Reds, globals: &'a mut Globals<'g>,
+                 rel_context: I) -> IdxResult<Self>
+        where I: Iterator<Item=&'b mut RDecl>
+    {
+        Ok(Infos {
+            flags: flgs,
+            globals: globals,
+            rels: Self::defined_rels(rel_context)?,
+            tab: KeyTable(HashMap::with_capacity(17)),
+        })
+    }
+
+    pub fn globals(&self) -> &Globals<'g> {
+        self.globals
     }
 }

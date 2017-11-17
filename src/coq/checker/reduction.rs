@@ -142,7 +142,9 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
         // however, I believe the reason the OCaml implementation is not written this way is mostly
         // that its stacks are linked lists, and therefore can't be efficiently iterated in
         // reverse.  Since we are using vectors in Rust, we don't have this issue.
-        let mut stk = LftConstrStack(Vec::new());
+        // TODO: If it weren't for coalescing Apps together, can this be replaced with a
+        // filter_map?
+        let mut stk = LftConstrStack(Vec::with_capacity(self.len()));
         for s in self.iter().rev() {
             match *s {
                 StackMember::Update(_, _) => {},

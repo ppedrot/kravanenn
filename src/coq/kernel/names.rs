@@ -8,6 +8,18 @@ use ocaml::values::{
 
 pub type MutInd = Cst;
 
+impl MutInd {
+    pub fn user(&self) -> &Kn {
+        match *self {
+            Cst::Same(ref kn) => kn,
+            Cst::Dual(ref o) => {
+                let (ref kn, _) = **o;
+                kn
+            },
+        }
+    }
+}
+
 pub type MpMap<T> = HashMap<Mp, T>;
 
 pub type KnMap<T> = HashMap<Kn, T>;
