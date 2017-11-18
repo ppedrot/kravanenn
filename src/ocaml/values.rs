@@ -269,7 +269,7 @@ pub struct CPrint {
 #[derive(DeserializeState, Debug,Clone)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct CaseInfo {
-    #[serde(deserialize_state)] ind: Ind,
+    #[serde(deserialize_state)] pub ind: Ind,
     pub npar: Int,
     #[serde(deserialize_state)] cstr_ndecls: Array<Int>,
     #[serde(deserialize_state)] cstr_nargs: Array<Int>,
@@ -807,7 +807,7 @@ let find_dyn name =
 
 /// Some useful helper implementations
 
-/// Iterators specialized to Lists.
+/// An iterator specialized to Lists.
 pub struct ListIter<'a, T> where T: 'a {
     node: &'a List<T>
 }
@@ -878,6 +878,43 @@ impl<'a, T> Iterator for OListIter<'a, T> {
 impl<T> OList<T> {
     pub fn iter<'a>(&'a self) -> OListIter<'a, T> {
         OListIter::new(self)
+    }
+}
+
+/// An iterator specialized to HLists.
+pub struct HListIter<'a, T> where T: 'a {
+    node: &'a HList<T>
+}
+
+impl<'a, T> HListIter<'a, T> {
+    fn new(node: &'a HList<T>) -> Self {
+        HListIter {
+            node: node,
+        }
+    }
+}
+
+impl<'a, T> Iterator for HListIter<'a, T> {
+    type Item = &'a T;
+
+    // Note: if there were a cycle (which there shouldn't be) in the original HList,
+    // this could loop forever.  But if used as intended (from a DeserializeSeed), this is unlikely
+    // to happen, since DeserializeSeed will already loop forever in that case...
+    fn next(&mut self) -> Option<&'a T> {
+        match *self.node {
+            HList::Cons(ref node) => {
+                let (ref v, _, ref next) = **node;
+                self.node = next;
+                return Some(v);
+            },
+            HList::Nil => None,
+        }
+    }
+}
+
+impl<T> HList<T> {
+    pub fn iter<'a>(&'a self) -> HListIter<'a, T> {
+        HListIter::new(self)
     }
 }
 

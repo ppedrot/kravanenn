@@ -1782,8 +1782,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     // Mutual tail recursion is fine in OCaml, but not Rust.
                     m = self.knh(info, v, ctx, i.clone(), s.clone())?;
                 },
-                FTerm::Construct(ref o) if info.flags.contains(Reds::IOTA) => {
-                    let c = ((**o).0).0.idx;
+                FTerm::Construct(o) if info.flags.contains(Reds::IOTA) => {
+                    let c = ((*o).0).0.idx;
                     let (depth, mut args) = self.strip_update_shift_app(m.clone(), ctx)?;
                     let shead = if let Some(shead) = self.pop() { shead } else {
                         *self = args;

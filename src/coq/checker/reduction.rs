@@ -12,8 +12,13 @@ use coq::checker::environ::{
     Env,
     Globals,
 };
+use coq::checker::univ::{
+    UnivError,
+    Universes,
+};
 use coq::kernel::esubst::{
     Idx,
+    IdxError,
     IdxResult,
     Lift,
 };
@@ -24,6 +29,8 @@ use ocaml::values::{
     CaseInfo,
     Constr,
     Cst,
+    Ind,
+    Instance,
 };
 use std::iter;
 use std::mem;
@@ -39,6 +46,15 @@ enum ZL<'a, 'b> where 'b: 'a {
 
 struct LftConstrStack<'a, 'b>(Vec<ZL<'a, 'b>>) where 'b: 'a;
 
+pub enum ConvError {
+    Idx(IdxError),
+    Univ(UnivError),
+    NotConvertible,
+    NotConvertibleVect(usize),
+}
+
+pub type ConvResult<T> = Result<T, ConvError>;
+
 impl<'a, 'b> ::std::ops::Deref for LftConstrStack<'a, 'b> {
     type Target = Vec<ZL<'a, 'b>>;
     fn deref(&self) -> &Vec<ZL<'a, 'b>> {
@@ -49,6 +65,18 @@ impl<'a, 'b> ::std::ops::Deref for LftConstrStack<'a, 'b> {
 impl<'a, 'b> ::std::ops::DerefMut for LftConstrStack<'a, 'b> {
     fn deref_mut(&mut self) -> &mut Vec<ZL<'a, 'b>> {
         &mut self.0
+    }
+}
+
+impl ::std::convert::From<IdxError> for ConvError {
+    fn from(e: IdxError) -> Self {
+        ConvError::Idx(e)
+    }
+}
+
+impl ::std::convert::From<UnivError> for ConvError {
+    fn from(e: UnivError) -> Self {
+        ConvError::Univ(e)
     }
 }
 
@@ -184,6 +212,69 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
         }
         return Ok(stk)
     }
+
+    /// Prerequisite: call with stacks of the same shape.
+    fn cmp_rec<T, F, FMind>
+        (f: &mut F, fmind: &mut FMind,
+         pstk1: LftConstrStack<'a, 'b>,
+         pstk2: LftConstrStack<'a, 'b>,
+         env: &mut T) -> ConvResult<()>
+        where
+            F: FnMut((&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>), &mut T) -> ConvResult<()>,
+            FMind: FnMut(&Ind, &Ind, &mut T) -> bool,
+    {
+        // The stacks have the same shape, so we don't need to worry about these mismatching.
+        for (z1, z2) in pstk1.0.into_iter().zip(pstk2.0.into_iter()) {
+            // Not sure why the loop doesn't tail recurse on the first element in OCaml.
+            // Presumably, changing the order in which we check these doesn't ruin everything...
+            match (z1, z2) {
+                (ZL::App(a1), ZL::App(a2)) => {
+                    for ((l1, c1), (l2, c2)) in a1.into_iter().zip(a2.into_iter()) {
+                        f((&l1, c1), (&l2, c2), env)?;
+                    }
+                },
+                (ZL::Fix(lfx1, fx1, a1), ZL::Fix(lfx2, fx2, a2)) => {
+                    f((&lfx1, fx1), (&lfx2, fx2), env)?;
+                    Self::cmp_rec(f, fmind, a1, a2, env)?;
+                },
+                (ZL::Proj(_, c1, _), ZL::Proj(_, c2, _)) => {
+                    if c1 != c2 { return Err(ConvError::NotConvertible) }
+                    // TODO: Figure out why we don't compare lifts here?
+                },
+                (ZL::Case(o1, l1, p1, br1),
+                 ZL::Case(o2, l2, p2, br2)) => {
+                    let (ref ci1, _, _, _) = **o1;
+                    let (ref ci2, _, _, _) = **o2;
+                    if !fmind(&ci1.ind, &ci2.ind, env) {
+                        return Err(ConvError::NotConvertible)
+                    }
+                    f((&l1, p1), (&l2, p2), env)?;
+                    for (c1, c2) in br1.into_iter().zip(br2.into_iter()) {
+                        f((&l1, c1), (&l2, c2), env)?;
+                    }
+                },
+                _ => unreachable!("Stacks should have the same shape."),
+            }
+        }
+        return Ok(())
+    }
+
+    pub fn compare_stacks<T, F, FMind>
+        (f: &mut F, fmind: &mut FMind,
+         lft1: &mut Lift, stk1: &Self,
+         lft2: &mut Lift, stk2: &Self,
+         ctx: &'a Context<'a, 'b>,
+         env: &mut T) -> ConvResult<()>
+        where
+            F: FnMut((&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>), &mut T) -> ConvResult<()>,
+            FMind: FnMut(&Ind, &Ind, &mut T) -> bool,
+    {
+        if stk1.compare_shape(stk2)? {
+            Self::cmp_rec(f, fmind, stk1.to_pure(lft1, ctx)?, stk2.to_pure(lft2, ctx)?, env)
+        } else {
+            Err(ConvError::NotConvertible)
+        }
+    }
 }
 
 impl Constr {
@@ -279,5 +370,13 @@ impl Constr {
         let t = t.substl(env)?;
         env.reverse();
         Ok(t.applist(stack.to_vec()))
+    }
+
+    /// Conversion
+
+    /// Conversion utility functions
+    pub fn convert_universes(univ: &Universes, u: &Instance, u_: &Instance) -> ConvResult<()> {
+        if univ.check_eq(u, u_)? { Ok(()) }
+        else { Err(ConvError::NotConvertible) }
     }
 }
