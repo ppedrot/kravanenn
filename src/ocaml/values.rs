@@ -74,9 +74,10 @@ pub struct Map<K, V>(pub HashMap<K, V>) where K: Hash + Eq;
 
 pub type HSet<V> = Map<Int, Set<V>>;
 
-#[derive(Debug, Clone,DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>> + 'static"))]
+/// FIXME: Make equality check the hash first?  Rust might already do this.
 pub enum HList<T> {
     Nil,
     Cons(#[serde(deserialize_state)] ORef<(T, Int, HList<T>)>),
@@ -179,13 +180,13 @@ pub enum RawLevel {
 #[derive(Debug, Clone,DeserializeState, Hash, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Level {
-    hash: Int,
-    #[serde(deserialize_state)] data: RawLevel,
+    pub hash: Int,
+    #[serde(deserialize_state)] pub data: RawLevel,
 }
 
-#[derive(Debug, Clone, DeserializeState)]
+#[derive(Debug, Clone, DeserializeState, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct Expr(#[serde(deserialize_state)] Level, Int);
+pub struct Expr(#[serde(deserialize_state)] pub Level, pub Int);
 
 pub type Univ = HList<Expr>;
 
@@ -219,7 +220,7 @@ pub type LevelSet = HSet<Level>;
 pub struct ContextSet(#[serde(deserialize_state)] LevelSet, #[serde(deserialize_state)] Cstrs);
 
 /* kernel/term */
-#[derive(Debug, Clone,DeserializeState)]
+#[derive(Clone, Copy, Debug, DeserializeState, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum SortContents {
     Pos,

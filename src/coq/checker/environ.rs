@@ -1,6 +1,6 @@
-/* use coq::checker::univ::{
+use coq::checker::univ::{
     Universes,
-}; */
+};
 use coq::kernel::names::{
     CMapEnv,
     KnMap,
@@ -13,7 +13,7 @@ use ocaml::values::{
     Constr,
     Cst,
     CstDef,
-    // Engagement,
+    Engagement,
     Ind,
     IndPack,
     Kn,
@@ -59,8 +59,8 @@ pub struct Globals<'g> {
 }
 
 pub struct Stratification {
-    // universes: Universes,
-    // enga: Engagement,
+    universes: Universes,
+    enga: Engagement,
 }
 
 pub struct Env<'b, 'g> where 'g: 'b {
@@ -74,7 +74,7 @@ pub struct Env<'b, 'g> where 'g: 'b {
     /// NOTE: We currently use Vec<RDecl> instead of RCtxt, just because it's somewhat easier
     /// to deal with.  We can always change it later.
     pub rel_context: &'b mut Vec<RDecl>,
-    // stratification: Stratification,
+    pub stratification: Stratification,
     // imports: MpMap<VoDigest>,
 }
 
@@ -197,5 +197,15 @@ impl<'g> Globals<'g> where {
     pub fn lookup_mind(&self, kn: &MutInd) -> Option<&'g IndPack>
     {
         self.inductives.get(kn).map( |&v| v )
+    }
+}
+
+impl Stratification {
+    pub fn universes(&self) -> &Universes {
+        &self.universes
+    }
+
+    pub fn engagement(&self) -> &Engagement {
+        &self.enga
     }
 }

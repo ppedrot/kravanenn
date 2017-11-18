@@ -29,8 +29,11 @@ use ocaml::values::{
     CaseInfo,
     Constr,
     Cst,
+    Engagement,
     Ind,
     Instance,
+    Sort,
+    SortContents,
 };
 use std::iter;
 use std::mem;
@@ -54,6 +57,12 @@ pub enum ConvError {
 }
 
 pub type ConvResult<T> = Result<T, ConvError>;
+
+#[derive(Clone,Copy,Debug,Eq,PartialEq)]
+pub enum ConvPb {
+  Conv,
+  Cumul,
+}
 
 impl<'a, 'b> ::std::ops::Deref for LftConstrStack<'a, 'b> {
     type Target = Vec<ZL<'a, 'b>>;
@@ -81,7 +90,7 @@ impl ::std::convert::From<UnivError> for ConvError {
 }
 
 impl<'a, 'b> LftConstrStack<'a, 'b> {
-    pub fn append(&mut self, mut v: Vec<(Lift, FConstr<'a, 'b>)>) {
+    fn append(&mut self, mut v: Vec<(Lift, FConstr<'a, 'b>)>) {
         // TODO: Work out why we don't do this here?
         // if v.len() == 0 { return }
         if let Some(&mut ZL::App(ref mut l)) = self.last_mut() {
@@ -212,69 +221,6 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
         }
         return Ok(stk)
     }
-
-    /// Prerequisite: call with stacks of the same shape.
-    fn cmp_rec<T, F, FMind>
-        (f: &mut F, fmind: &mut FMind,
-         pstk1: LftConstrStack<'a, 'b>,
-         pstk2: LftConstrStack<'a, 'b>,
-         env: &mut T) -> ConvResult<()>
-        where
-            F: FnMut((&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>), &mut T) -> ConvResult<()>,
-            FMind: FnMut(&Ind, &Ind, &mut T) -> bool,
-    {
-        // The stacks have the same shape, so we don't need to worry about these mismatching.
-        for (z1, z2) in pstk1.0.into_iter().zip(pstk2.0.into_iter()) {
-            // Not sure why the loop doesn't tail recurse on the first element in OCaml.
-            // Presumably, changing the order in which we check these doesn't ruin everything...
-            match (z1, z2) {
-                (ZL::App(a1), ZL::App(a2)) => {
-                    for ((l1, c1), (l2, c2)) in a1.into_iter().zip(a2.into_iter()) {
-                        f((&l1, c1), (&l2, c2), env)?;
-                    }
-                },
-                (ZL::Fix(lfx1, fx1, a1), ZL::Fix(lfx2, fx2, a2)) => {
-                    f((&lfx1, fx1), (&lfx2, fx2), env)?;
-                    Self::cmp_rec(f, fmind, a1, a2, env)?;
-                },
-                (ZL::Proj(_, c1, _), ZL::Proj(_, c2, _)) => {
-                    if c1 != c2 { return Err(ConvError::NotConvertible) }
-                    // TODO: Figure out why we don't compare lifts here?
-                },
-                (ZL::Case(o1, l1, p1, br1),
-                 ZL::Case(o2, l2, p2, br2)) => {
-                    let (ref ci1, _, _, _) = **o1;
-                    let (ref ci2, _, _, _) = **o2;
-                    if !fmind(&ci1.ind, &ci2.ind, env) {
-                        return Err(ConvError::NotConvertible)
-                    }
-                    f((&l1, p1), (&l2, p2), env)?;
-                    for (c1, c2) in br1.into_iter().zip(br2.into_iter()) {
-                        f((&l1, c1), (&l2, c2), env)?;
-                    }
-                },
-                _ => unreachable!("Stacks should have the same shape."),
-            }
-        }
-        return Ok(())
-    }
-
-    pub fn compare_stacks<T, F, FMind>
-        (f: &mut F, fmind: &mut FMind,
-         lft1: &mut Lift, stk1: &Self,
-         lft2: &mut Lift, stk2: &Self,
-         ctx: &'a Context<'a, 'b>,
-         env: &mut T) -> ConvResult<()>
-        where
-            F: FnMut((&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>), &mut T) -> ConvResult<()>,
-            FMind: FnMut(&Ind, &Ind, &mut T) -> bool,
-    {
-        if stk1.compare_shape(stk2)? {
-            Self::cmp_rec(f, fmind, stk1.to_pure(lft1, ctx)?, stk2.to_pure(lft2, ctx)?, env)
-        } else {
-            Err(ConvError::NotConvertible)
-        }
-    }
 }
 
 impl Constr {
@@ -305,7 +251,7 @@ impl Constr {
             Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) | Constr::Lambda(_) |
             Constr::Fix(_) | Constr::CoFix(_) => Ok(self),
             _ => {
-                let Env { ref mut globals, ref mut rel_context } = *env;
+                let Env { ref mut globals, ref mut rel_context, .. } = *env;
                 let ref ctx = Context::new();
                 let mut infos = Infos::create(Reds::BETADELTAIOTA, globals,
                                               rel_context.iter_mut())?;
@@ -324,7 +270,7 @@ impl Constr {
             Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) | Constr::Lambda(_) |
             Constr::Fix(_) | Constr::CoFix(_) | Constr::LetIn(_) => Ok(self),
             _ => {
-                let Env { ref mut globals, ref mut rel_context } = *env;
+                let Env { ref mut globals, ref mut rel_context, .. } = *env;
                 let ref ctx = Context::new();
                 let mut infos = Infos::create(Reds::BETADELTAIOTANOLET, globals,
                                               rel_context.iter_mut())?;
@@ -371,12 +317,118 @@ impl Constr {
         env.reverse();
         Ok(t.applist(stack.to_vec()))
     }
+}
 
-    /// Conversion
+/// Conversion
 
-    /// Conversion utility functions
-    pub fn convert_universes(univ: &Universes, u: &Instance, u_: &Instance) -> ConvResult<()> {
-        if univ.check_eq(u, u_)? { Ok(()) }
+/// Conversion utility functions
+
+impl Universes {
+    fn convert_universes(&self, u: &Instance, u_: &Instance) -> ConvResult<()> {
+        if self.check_eq(u, u_)? { Ok(()) }
         else { Err(ConvError::NotConvertible) }
+    }
+}
+
+fn compare_stacks<'a, 'b, I, S, T, F, FMind>
+    (f: &mut F, fmind: &mut FMind,
+     lft1: &mut Lift, stk1: &Stack<'a, 'b, I, S>,
+     lft2: &mut Lift, stk2: &Stack<'a, 'b, I, S>,
+     ctx: &'a Context<'a, 'b>,
+     env: &mut T) -> ConvResult<()>
+    where
+        F: FnMut((&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>), &mut T) -> ConvResult<()>,
+        FMind: FnMut(&Ind, &Ind, &mut T) -> bool,
+{
+    /// Prerequisite: call with stacks of the same shape.
+    fn cmp_rec<'a, 'b, T, F, FMind>
+        (f: &mut F, fmind: &mut FMind,
+         pstk1: LftConstrStack<'a, 'b>,
+         pstk2: LftConstrStack<'a, 'b>,
+         env: &mut T) -> ConvResult<()>
+        where
+            F: FnMut((&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>), &mut T) -> ConvResult<()>,
+            FMind: FnMut(&Ind, &Ind, &mut T) -> bool,
+    {
+        // The stacks have the same shape, so we don't need to worry about these mismatching.
+        for (z1, z2) in pstk1.0.into_iter().zip(pstk2.0.into_iter()) {
+            // Not sure why the loop doesn't tail recurse on the first element in OCaml.
+            // Presumably, changing the order in which we check these doesn't ruin everything...
+            match (z1, z2) {
+                (ZL::App(a1), ZL::App(a2)) => {
+                    for ((l1, c1), (l2, c2)) in a1.into_iter().zip(a2.into_iter()) {
+                        f((&l1, c1), (&l2, c2), env)?;
+                    }
+                },
+                (ZL::Fix(lfx1, fx1, a1), ZL::Fix(lfx2, fx2, a2)) => {
+                    f((&lfx1, fx1), (&lfx2, fx2), env)?;
+                    cmp_rec(f, fmind, a1, a2, env)?;
+                },
+                (ZL::Proj(_, c1, _), ZL::Proj(_, c2, _)) => {
+                    if c1 != c2 { return Err(ConvError::NotConvertible) }
+                    // TODO: Figure out why we don't compare lifts here?
+                },
+                (ZL::Case(o1, l1, p1, br1),
+                 ZL::Case(o2, l2, p2, br2)) => {
+                    let (ref ci1, _, _, _) = **o1;
+                    let (ref ci2, _, _, _) = **o2;
+                    if !fmind(&ci1.ind, &ci2.ind, env) {
+                        return Err(ConvError::NotConvertible)
+                    }
+                    f((&l1, p1), (&l2, p2), env)?;
+                    for (c1, c2) in br1.into_iter().zip(br2.into_iter()) {
+                        f((&l1, c1), (&l2, c2), env)?;
+                    }
+                },
+                _ => unreachable!("Stacks should have the same shape."),
+            }
+        }
+        return Ok(())
+    }
+
+    if stk1.compare_shape(stk2)? {
+        cmp_rec(f, fmind, stk1.to_pure(lft1, ctx)?, stk2.to_pure(lft2, ctx)?, env)
+    } else {
+        Err(ConvError::NotConvertible)
+    }
+}
+
+impl Engagement {
+    /// Convertibility of sorts
+    fn sort_cmp(&self, univ: &Universes, pb: ConvPb, s0: &Sort, s1: &Sort) -> ConvResult<()> {
+        match (s0, s1) {
+            (&Sort::Prop(c1), &Sort::Prop(c2)) if pb == ConvPb::Cumul => {
+                if c1 == SortContents::Pos && c2 == SortContents::Null {
+                    return Err(ConvError::NotConvertible)
+                }
+            },
+            (&Sort::Prop(ref c1), &Sort::Prop(ref c2)) => {
+                if c1 != c2 {
+                    return Err(ConvError::NotConvertible)
+                }
+            },
+            (&Sort::Prop(_), &Sort::Type(_)) => {
+                match pb {
+                    ConvPb::Cumul => (),
+                    _ => return Err(ConvError::NotConvertible),
+                }
+            },
+            (&Sort::Type(ref u1), &Sort::Type(ref u2)) => {
+                // FIXME: handle type-in-type option here
+                // TODO: Figure out what the above comment means.
+                if /* snd (engagement env) == StratifiedType && */
+                    !(match pb {
+                        // TODO: Maybe make this a trait?  Not that the dynamic dispatch here takes
+                        // very much time, but why leave performance on the table?
+                        ConvPb::Conv => u1.check_eq(u2, univ)?,
+                        ConvPb::Cumul => u1.check_leq(u2, univ)?,
+                    }) {
+                    // TODO: Print information here (as OCaml does) on error if debug mode is set.
+                    return Err(ConvError::NotConvertible)
+                }
+            },
+            (_, _) => return Err(ConvError::NotConvertible),
+        }
+        return Ok(())
     }
 }
