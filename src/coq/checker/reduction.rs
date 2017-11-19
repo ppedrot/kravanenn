@@ -1030,7 +1030,7 @@ impl<'b, 'g> Env<'b, 'g> {
 
     fn fconv(&mut self, cv_pb: ConvPb, eager_delta: bool,
              t1: &Constr, t2: &Constr) -> ConvResult<()> {
-        if t1.eq_constr(t2) { Ok(()) }
+        if t1.eq(t2) { Ok(()) }
         else { self.clos_fconv(cv_pb, eager_delta, t1, t2) }
     }
 
@@ -1121,9 +1121,9 @@ impl<'b, 'g> Env<'b, 'g> {
                     ty = c.clone();
                 },
                 _ => {
-                    let rty_ = rty.whd_all(self)?;
-                    if rty_.eq_constr(rty) { Ok(())
-                    else { y = rty_; }
+                    let rty_ = rty.clone().whd_all(self)?;
+                    if rty_.eq(&rty) { return Ok((l, rty)) }
+                    else { ty = rty_; }
                 },
             }
         }
