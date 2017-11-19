@@ -41,6 +41,7 @@ enum UnivEntry {
 
 pub struct Universes(UMap<UnivEntry>);
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnivError {
     Anomaly(String),
 }

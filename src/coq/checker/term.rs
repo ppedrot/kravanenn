@@ -5,9 +5,16 @@ use ocaml::de::{ORef, Array};
 use ocaml::values::{
     CoFix,
     Constr,
+    Cst,
     Fix,
+    Fix2,
+    Ind,
     Name,
     PRec,
+    PUniverses,
+    RDecl,
+    Sort,
+    SortContents,
 };
 use std::cell::Cell;
 use std::option::{NoneError};
@@ -30,6 +37,8 @@ pub struct Substituend<A> {
     info: Cell<Info>,
     it: A,
 }
+
+pub type Arity = (Vec<RDecl>, ORef<Sort>);
 
 impl<A> Substituend<A> {
     pub fn make(c: A) -> Self {
@@ -63,6 +72,41 @@ impl<'a> Substituend<&'a Constr> {
 
 impl Constr {
     /// Constructions as implemented
+
+    pub fn strip_outer_cast(&self) -> &Self {
+        let mut c = self;
+        while let Constr::Cast(ref o) = *c {
+            let (ref c_, _, _) = **o;
+            c = c_;
+        }
+        c
+    }
+
+    /// Warning: returned argument order is reversed from the OCaml implementation!
+    ///
+    /// We could also consider a VecDeque, but we only ever append one way so it seems like a
+    /// waste...
+    pub fn collapse_appl<'a>(&'a self, cl: &'a [Self]) -> (&Self, Vec<&Self>) {
+        // FIXME: Consider a non-allocating version that works as an intrusive iterator, or a
+        // reversed iterator; both would suffice for our purposes here.
+        let mut f = self;
+        // Argument order is reversed, so extending to the right is prepending.
+        let mut cl2: Vec<&Self> = cl.iter().collect();
+        while let Constr::App(ref o) = *f.strip_outer_cast() {
+            let (ref g, ref cl1) = **o;
+            f = g;
+            cl2.extend(cl1.iter().rev());
+        }
+        (f, cl2)
+    }
+
+    /// This method has arguments in the same order as the OCaml.
+    pub fn decompose_app<'a>(&'a self, cl: &'a [Self]) -> (&Self, Vec<&Self>) {
+        let (f, mut cl) = self.collapse_appl(cl);
+        cl.reverse();
+        (f, cl)
+    }
+
     pub fn applist(self, l: Vec<Constr>) -> Constr {
         Constr::App(ORef(Rc::from((self, Array(Rc::from(l))))))
     }
@@ -417,5 +461,140 @@ impl Constr {
                 }
             }
         }
+    }
+
+    /// Alpha conversion functions
+
+    /// alpha conversion : ignore print names and casts
+    pub fn compare<F>(&self, t2: &Self, f: F) -> bool
+        where F: Fn(&Self, &Self) -> bool,
+    {
+        // FIXME: This is (in some cases) unnecessarily tail recursive.  We could reduce the amount
+        // of recursion required (and the likelihood that we'll get a stack overflow) by making the
+        // function slightly less generic.
+        match (self, t2) {
+            (&Constr::Rel(n1), &Constr::Rel(n2)) => n1 == n2,
+            // | Meta m1, Meta m2 -> Int.equal m1 m2
+            // | Var id1, Var id2 -> Id.equal id1 id2
+            (&Constr::Sort(ref s1), &Constr::Sort(ref s2)) => s1.compare(s2),
+            (&Constr::Cast(ref o1), _) => {
+                let (ref c1, _, _) = **o1;
+                f(c1, t2)
+            },
+            (_, &Constr::Cast(ref o2)) => {
+                let (ref c2, _, _) = **o2;
+                f(self, c2)
+            },
+            (&Constr::Prod(ref o1), &Constr::Prod(ref o2)) => {
+                let (_, ref t1, ref c1) = **o1;
+                let (_, ref t2, ref c2) = **o2;
+                f(t1, t2) && f(c1, c2)
+            },
+            (&Constr::Lambda(ref o1), &Constr::Lambda(ref o2)) => {
+                let (_, ref t1, ref c1) = **o1;
+                let (_, ref t2, ref c2) = **o2;
+                f(t1, t2) && f(c1, c2)
+            },
+            (&Constr::LetIn(ref o1), &Constr::LetIn(ref o2)) => {
+                let (_, ref b1, ref t1, ref c1) = **o1;
+                let (_, ref b2, ref t2, ref c2) = **o2;
+                f(b1, b2) && f(t1, t2) && f(c1, c2)
+            },
+            (&Constr::App(ref o1), &Constr::App(ref o2)) => {
+                let (ref c1, ref l1) = **o1;
+                let (ref c2, ref l2) = **o2;
+                if l1.len() == l2.len() {
+                    f(c1, c2) && l1.iter().zip(l2.iter()).all( |(x, y)| f(x, y) )
+                } else {
+                    // It's really sad that we have to allocate to perform this equality check in
+                    // linear time...
+                    // (we actually shouldn't, since we should be able to modify the nodes in-place
+                    // in order to reuse the existing memory, but fixing this might be more trouble
+                    // than it's worth).
+                    // FIXME: Alternative: a reversed iterator may be doable quite efficiently
+                    // (without allocating), especially since we don't really need to go in forward
+                    // order to do equality checks...
+                    let (h1, l1) = c1.collapse_appl(&***l1);
+                    let (h2, l2) = c2.collapse_appl(&***l2);
+                    // We currently check in the opposite order from the OCaml, since we use the
+                    // reversed method.  This shouldn't matter in terms of results, but it might
+                    // affect performance... we could also iterate in reverse.
+                    if l1.len() == l2.len() {
+                        f(h1, h2) && l1.iter().zip(l2.iter()).all( |(x, y)| f(x, y) )
+                    } else { false }
+                }
+            },
+            // | Evar (e1,l1), Evar (e2,l2) -> Int.equal e1 e2 && Array.equal f l1 l2
+            (&Constr::Const(ref o1), &Constr::Const(ref o2)) => {
+                let ref c1 = **o1;
+                let ref c2 = **o2;
+                c1.eq(c2, Cst::eq_con_chk)
+            },
+            (&Constr::Ind(ref c1), &Constr::Ind(ref c2)) => c1.eq(c2, Ind::eq_ind_chk),
+            (&Constr::Construct(ref o1), &Constr::Construct(ref o2)) => {
+                let PUniverses(ref i1, ref u1) = **o1;
+                let PUniverses(ref i2, ref u2) = **o2;
+                i1.idx == i2.idx && i1.ind.eq_ind_chk(&i2.ind) && u1 == u2
+            },
+            (&Constr::Case(ref o1), &Constr::Case(ref o2)) => {
+                let (_, ref p1, ref c1, ref bl1) = **o1;
+                let (_, ref p2, ref c2, ref bl2) = **o2;
+                f(p1, p2) && f(c1, c2) &&
+                bl1.len() == bl2.len() && bl1.iter().zip(bl2.iter()).all( |(x, y)| f(x, y))
+            },
+            (&Constr::Fix(ref o1), &Constr::Fix(ref o2)) => {
+                let Fix(Fix2(ref ln1, i1), PRec(_, ref tl1, ref bl1)) = **o1;
+                let Fix(Fix2(ref ln2, i2), PRec(_, ref tl2, ref bl2)) = **o2;
+                i1 == i2 &&
+                ln1.len() == ln2.len() && ln1.iter().zip(ln2.iter()).all( |(x, y)| x == y) &&
+                tl1.len() == tl2.len() && tl1.iter().zip(tl2.iter()).all( |(x, y)| f(x, y) ) &&
+                bl1.len() == bl2.len() && bl1.iter().zip(bl2.iter()).all( |(x, y)| f(x, y) )
+            },
+            (&Constr::CoFix(ref o1), &Constr::CoFix(ref o2)) => {
+                let CoFix(ln1, PRec(_, ref tl1, ref bl1)) = **o1;
+                let CoFix(ln2, PRec(_, ref tl2, ref bl2)) = **o2;
+                ln1 == ln2 &&
+                tl1.len() == tl2.len() && tl1.iter().zip(tl2.iter()).all( |(x, y)| f(x, y) ) &&
+                bl1.len() == bl2.len() && bl1.iter().zip(bl2.iter()).all( |(x, y)| f(x, y) )
+            },
+            (&Constr::Proj(ref o1), &Constr::Proj(ref o2)) => {
+                let (ref p1, ref c1) = **o1;
+                let (ref p2, ref c2) = **o2;
+                p1.equal(p2) && f(c1, c2)
+            },
+            (_, _) => false,
+        }
+    }
+
+    pub fn eq(&self, n: &Self) -> bool {
+        self as *const _ == n as *const _ ||
+        self.compare(n, Self::eq)
+    }
+}
+
+impl Sort {
+    fn compare(&self, s2: &Self) -> bool {
+        match (self, s2) {
+            (&Sort::Prop(c1), &Sort::Prop(c2)) => {
+                match (c1, c2) {
+                    (SortContents::Pos, SortContents::Pos) |
+                    (SortContents::Null, SortContents::Null) => true,
+                    (SortContents::Pos, SortContents::Null) => false,
+                    (SortContents::Null, SortContents::Pos) => false,
+                }
+            },
+            (&Sort::Type(ref u1), &Sort::Type(ref u2)) => u1 == u2,
+            (&Sort::Prop(_), &Sort::Type(_)) => false,
+            (&Sort::Type(_), &Sort::Prop(_)) => false,
+        }
+    }
+}
+
+impl<T> PUniverses<T> {
+    fn eq<F>(&self, &PUniverses(ref c2, ref u2): &Self, f: F) -> bool
+        where F: Fn(&T, &T) -> bool,
+    {
+        let PUniverses(ref c1, ref u1) = *self;
+        u1 == u2 && f(c1, c2)
     }
 }

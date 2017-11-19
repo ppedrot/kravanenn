@@ -49,14 +49,15 @@ pub type MRef<'b, T> = &'b ORef<T>;
  * constants.
  */
 
-#[derive(Copy,Clone,Debug,Eq,Hash,PartialEq)]
-pub enum TableKey<T> {
+#[derive(Copy,Clone,Debug, Eq, Hash)]
+pub enum TableKey<T> where TableKey<T>: PartialEq {
     ConstKey(T),
     // should not occur
     // VarKey(Id),
     RelKey(Idx),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RedError {
     Idx(IdxError),
     Env(EnvError),
@@ -280,6 +281,20 @@ impl<'b, T> ::std::ops::DerefMut for KeyTable<'b, T> {
 impl<'b> Into<&'b Constr> for &'b mut Constr {
     fn into(self) -> &'b Constr {
         &*self
+    }
+}
+
+impl<'b> PartialEq for TableKeyC<'b> {
+    fn eq(&self, o: &Self) -> bool {
+        match (*self, *o) {
+            (TableKey::ConstKey(o1), TableKey::ConstKey(o2)) => {
+                let PUniverses(ref c1, ref u1) = **o1;
+                let PUniverses(ref c2, ref u2) = **o2;
+                c1.user_equal(c2) && u1 == u2
+            },
+            (TableKey::RelKey(i1), TableKey::RelKey(i2)) => i1 == i2,
+            (_, _) => false,
+        }
     }
 }
 

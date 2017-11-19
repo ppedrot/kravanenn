@@ -139,7 +139,7 @@ pub struct Kn {
     refhash: Int,
 }
 
-#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, DeserializeState, Hash, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Cst {
     Dual(#[serde(deserialize_state)] ORef<(Kn, Kn)>), // user then canonical

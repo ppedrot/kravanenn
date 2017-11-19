@@ -78,12 +78,13 @@ pub struct Env<'b, 'g> where 'g: 'b {
     // imports: MpMap<VoDigest>,
 }
 
-#[derive(Debug,Copy,Clone)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConstEvaluationResult {
     NoBody,
     Opaque,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnvError {
     Anomaly(String),
     NotEvaluableConst(ConstEvaluationResult),
@@ -207,5 +208,11 @@ impl Stratification {
 
     pub fn engagement(&self) -> &Engagement {
         &self.enga
+    }
+}
+
+impl<'b, 'g> Env<'b, 'g> {
+    pub fn push_rel(&mut self, d: RDecl) {
+        self.rel_context.push(d);
     }
 }

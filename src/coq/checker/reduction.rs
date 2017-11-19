@@ -17,6 +17,9 @@ use coq::checker::environ::{
     EnvError,
     Globals,
 };
+use coq::checker::term::{
+    Arity,
+};
 use coq::checker::univ::{
     UnivError,
     Universes,
@@ -31,6 +34,7 @@ use coq::kernel::esubst::{
 use core::convert::{TryFrom};
 use core::nonzero::{NonZero};
 use ocaml::de::{
+    ORef,
     Array,
 };
 use ocaml::values::{
@@ -46,12 +50,14 @@ use ocaml::values::{
     Instance,
     PRec,
     PUniverses,
+    RDecl,
     Sort,
     SortContents,
 };
 use std::borrow::{Cow};
 use std::iter;
 use std::mem;
+use std::rc::{Rc};
 
 /// lft_constr_stack_elt
 enum ZL<'a, 'b> where 'b: 'a {
@@ -64,6 +70,7 @@ enum ZL<'a, 'b> where 'b: 'a {
 
 struct LftConstrStack<'a, 'b>(Vec<ZL<'a, 'b>>) where 'b: 'a;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConvError {
     Anomaly(String),
     Env(EnvError),
@@ -73,9 +80,10 @@ pub enum ConvError {
     NotConvertible,
     NotConvertibleVect(usize),
     NotFound,
+    UserError(String),
 }
 
-pub type ConvResult<T> = Result<T, ConvError>;
+pub type ConvResult<T> = Result<T, Box<ConvError>>;
 
 #[derive(Clone,Copy,Debug,Eq,PartialEq)]
 pub enum ConvPb {
@@ -96,27 +104,27 @@ impl<'a, 'b> ::std::ops::DerefMut for LftConstrStack<'a, 'b> {
     }
 }
 
-impl ::std::convert::From<EnvError> for ConvError {
+impl ::std::convert::From<EnvError> for Box<ConvError> {
     fn from(e: EnvError) -> Self {
-        ConvError::Env(e)
+        Box::new(ConvError::Env(e))
     }
 }
 
-impl ::std::convert::From<IdxError> for ConvError {
+impl ::std::convert::From<IdxError> for Box<ConvError> {
     fn from(e: IdxError) -> Self {
-        ConvError::Idx(e)
+        Box::new(ConvError::Idx(e))
     }
 }
 
-impl ::std::convert::From<UnivError> for ConvError {
+impl ::std::convert::From<UnivError> for Box<ConvError> {
     fn from(e: UnivError) -> Self {
-        ConvError::Univ(e)
+        Box::new(ConvError::Univ(e))
     }
 }
 
-impl ::std::convert::From<Box<RedError>> for ConvError {
+impl ::std::convert::From<Box<RedError>> for Box<ConvError> {
     fn from(e: Box<RedError>) -> Self {
-        ConvError::Red(e)
+        Box::new(ConvError::Red(e))
     }
 }
 
@@ -425,7 +433,7 @@ impl Constr {
 impl Universes {
     fn convert(&self, u: &Instance, u_: &Instance) -> ConvResult<()> {
         if u.check_eq(u_, self)? { Ok(()) }
-        else { Err(ConvError::NotConvertible) }
+        else { Err(Box::new(ConvError::NotConvertible)) }
     }
 }
 
@@ -463,8 +471,8 @@ fn compare_stacks<'a, 'b, I, S, T, F, FMind>
                     f(env, (&lfx1, fx1), (&lfx2, fx2))?;
                     cmp_rec(f, fmind, a1, a2, env)?;
                 },
-                (ZL::Proj(_, c1, _), ZL::Proj(_, c2, _)) => {
-                    if c1 != c2 { return Err(ConvError::NotConvertible) }
+                (ZL::Proj(c1, _, _), ZL::Proj(c2, _, _)) => {
+                    if !c1.eq_con_chk(c2) { return Err(Box::new(ConvError::NotConvertible)) }
                     // TODO: Figure out why we don't compare lifts here?
                 },
                 (ZL::Case(o1, l1, p1, br1),
@@ -472,7 +480,7 @@ fn compare_stacks<'a, 'b, I, S, T, F, FMind>
                     let (ref ci1, _, _, _) = **o1;
                     let (ref ci2, _, _, _) = **o2;
                     if !fmind(env, &ci1.ind, &ci2.ind) {
-                        return Err(ConvError::NotConvertible)
+                        return Err(Box::new(ConvError::NotConvertible))
                     }
                     f(env, (&l1, p1), (&l2, p2))?;
                     for (c1, c2) in br1.into_iter().zip(br2.into_iter()) {
@@ -488,7 +496,7 @@ fn compare_stacks<'a, 'b, I, S, T, F, FMind>
     if stk1.compare_shape(stk2)? {
         cmp_rec(f, fmind, stk1.to_pure(lft1, ctx)?, stk2.to_pure(lft2, ctx)?, env)
     } else {
-        Err(ConvError::NotConvertible)
+        Err(Box::new(ConvError::NotConvertible))
     }
 }
 
@@ -498,18 +506,18 @@ impl Engagement {
         match (s0, s1) {
             (&Sort::Prop(c1), &Sort::Prop(c2)) if pb == ConvPb::Cumul => {
                 if c1 == SortContents::Pos && c2 == SortContents::Null {
-                    return Err(ConvError::NotConvertible)
+                    return Err(Box::new(ConvError::NotConvertible))
                 }
             },
             (&Sort::Prop(ref c1), &Sort::Prop(ref c2)) => {
                 if c1 != c2 {
-                    return Err(ConvError::NotConvertible)
+                    return Err(Box::new(ConvError::NotConvertible))
                 }
             },
             (&Sort::Prop(_), &Sort::Type(_)) => {
                 match pb {
                     ConvPb::Cumul => (),
-                    _ => return Err(ConvError::NotConvertible),
+                    _ => return Err(Box::new(ConvError::NotConvertible)),
                 }
             },
             (&Sort::Type(ref u1), &Sort::Type(ref u2)) => {
@@ -523,10 +531,10 @@ impl Engagement {
                         ConvPb::Cumul => u1.check_leq(u2, univ)?,
                     }) {
                     // TODO: Print information here (as OCaml does) on error if debug mode is set.
-                    return Err(ConvError::NotConvertible)
+                    return Err(Box::new(ConvError::NotConvertible))
                 }
             },
-            (_, _) => return Err(ConvError::NotConvertible),
+            (_, _) => return Err(Box::new(ConvError::NotConvertible)),
         }
         return Ok(())
     }
@@ -545,7 +553,8 @@ impl<'b> TableKeyC<'b> {
 impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
     fn unfold_projection_infos<I, S>(&self, p: &'b Cst, b: bool,
                                      i: I) -> ConvResult<StackMember<'a, 'b, I, S>> {
-        let pb = self.globals().lookup_projection(p).ok_or(ConvError::NotFound)??;
+        let pb = self.globals().lookup_projection(p)
+                               .ok_or_else(|| Box::new(ConvError::NotFound))??;
         // TODO: Verify that npars and arg being within usize is checked at some
         // point during typechecking.
         let npars = usize::try_from(pb.npars).map_err(IdxError::from)?;
@@ -628,7 +637,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                 (&FTerm::Rel(n), &FTerm::Rel(m)) => {
                     return if el1.reloc_rel(n)? == el2.reloc_rel(m)? {
                         self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx)
-                    } else { Err(ConvError::NotConvertible) }
+                    } else { Err(Box::new(ConvError::NotConvertible)) }
                 },
                 // 2 constants or 2 defined rels (no locally defined vars in the checker)
                 (&FTerm::Flex(fl1), &FTerm::Flex(fl2)) => {
@@ -637,9 +646,9 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     let res = if fl1 == fl2 {
                         self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2,
                                             i.clone(), s.clone(), ctx)
-                    } else { Err(ConvError::NotConvertible) };
+                    } else { Err(Box::new(ConvError::NotConvertible)) };
                     match res {
-                        Err(ConvError::NotConvertible) => {
+                        Err(ref o) if **o == ConvError::NotConvertible => {
                             // else the oracle tells which constant is to be expanded.
                             if fl1.oracle_order(&fl2) {
                                 match self.unfold_reference(fl1, ctx)?
@@ -654,7 +663,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                                             hd2 = v2.whd_stack(self, def2, ctx,
                                                                i.clone(), s.clone())?;
                                         },
-                                        None => return Err(ConvError::NotConvertible),
+                                        None => return Err(Box::new(ConvError::NotConvertible)),
                                     },
                                 }
                             } else {
@@ -670,7 +679,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                                             hd1 = v1.whd_stack(self, def1, ctx,
                                                                i.clone(), s.clone())?;
                                         },
-                                        None => return Err(ConvError::NotConvertible),
+                                        None => return Err(Box::new(ConvError::NotConvertible)),
                                     },
                                 }
                             }
@@ -747,9 +756,8 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                 (&FTerm::Lambda(ref ty1, b1, ref e1), _) => {
                     // TODO: Figure out why do we not allow updates or shifts here.
                     if v1.len() != 0 {
-                        return Err(
-                            ConvError::Anomaly("conversion was given an unreduced term (FLamda)"
-                                               .into()));
+                        const E : &'static str = "conversion was given an unreduced term (FLamda)";
+                        return Err(Box::new(ConvError::Anomaly(E.into())))
                     }
                     let (_, _, bd1) = FTerm::dest_flambda(Subs::mk_clos, ty1, b1, e1, ctx)?;
                     v2.eta_expand_stack(ctx, s.clone());
@@ -769,9 +777,8 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                 (_, &FTerm::Lambda(ref ty2, b2, ref e2)) => {
                     // TODO: Figure out why do we not allow updates or shifts here.
                     if v2.len() != 0 {
-                        return Err(
-                            ConvError::Anomaly("conversion was given an unreduced term (FLamda)"
-                                               .into()));
+                        const E : &'static str = "conversion was given an unreduced term (FLamda)";
+                        return Err(Box::new(ConvError::Anomaly(E.into())));
                     }
                     let (_, _, bd2) = FTerm::dest_flambda(Subs::mk_clos, ty2, b2, e2, ctx)?;
                     v1.eta_expand_stack(ctx, s.clone());
@@ -806,10 +813,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                                     return self.convert_stacks(univ, enga, &lft1, &lft2,
                                                                &mut v1, &mut v2, i, s, ctx)
                                 },
-                                None => return Err(ConvError::NotConvertible),
+                                None => return Err(Box::new(ConvError::NotConvertible)),
                             }
                         },
-                        _ => return Err(ConvError::NotConvertible),
+                        _ => return Err(Box::new(ConvError::NotConvertible)),
                     },
                     // Loop through again.
                 },
@@ -830,10 +837,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                                     return self.convert_stacks(univ, enga, &lft1, &lft2,
                                                                &mut v1, &mut v2, i, s, ctx)
                                 },
-                                None => return Err(ConvError::NotConvertible),
+                                None => return Err(Box::new(ConvError::NotConvertible)),
                             }
                         },
-                        _ => return Err(ConvError::NotConvertible),
+                        _ => return Err(Box::new(ConvError::NotConvertible)),
                     },
                     // Loop through again.
                 },
@@ -845,7 +852,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         univ.convert(u1, u2)?;
                         self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx)
                     } else {
-                        Err(ConvError::NotConvertible)
+                        Err(Box::new(ConvError::NotConvertible))
                     }
                 },
                 (&FTerm::Construct(o1), &FTerm::Construct(o2)) => {
@@ -855,7 +862,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         univ.convert(u1, u2)?;
                         self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx)
                     } else {
-                        Err(ConvError::NotConvertible)
+                        Err(Box::new(ConvError::NotConvertible))
                     }
                 },
                 // Eta expansion of records
@@ -870,7 +877,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                             return self.convert_stacks(univ, enga, &lft1, &lft2,
                                                        &mut v1, &mut v2, i, s, ctx)
                         },
-                        None => return Err(ConvError::NotConvertible),
+                        None => return Err(Box::new(ConvError::NotConvertible)),
                     }
                 },
                 (_, &FTerm::Construct(o)) => {
@@ -884,7 +891,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                             return self.convert_stacks(univ, enga, &lft1, &lft2,
                                                        &mut v1, &mut v2, i, s, ctx)
                         },
-                        None => return Err(ConvError::NotConvertible),
+                        None => return Err(Box::new(ConvError::NotConvertible)),
                     }
                 },
                 (&FTerm::Fix(o1, n1, ref e1), &FTerm::Fix(o2, n2, ref e2)) => {
@@ -925,7 +932,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         }
                         return self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx);
                     } else {
-                        return Err(ConvError::NotConvertible)
+                        return Err(Box::new(ConvError::NotConvertible))
                     }
                 },
                 (&FTerm::CoFix(o1, n1, ref e1), &FTerm::CoFix(o2, n2, ref e2)) => {
@@ -966,7 +973,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         }
                         return self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx);
                     } else {
-                        return Err(ConvError::NotConvertible)
+                        return Err(Box::new(ConvError::NotConvertible))
                     }
                 },
                 // Should not happen because both (hd1,v1) and (hd2,v2) are in whnf
@@ -979,7 +986,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     panic!("Should not happen because both (hd1,v1) and (hd2,v2) are in whnf")
                 },
                 // In all other cases, terms are not convertible
-                (_, _) => return Err(ConvError::NotConvertible),
+                (_, _) => return Err(Box::new(ConvError::NotConvertible)),
             }
         }
     }
@@ -1002,5 +1009,159 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
             ctx,
             self
         )
+    }
+}
+
+impl<'b, 'g> Env<'b, 'g> {
+    fn clos_fconv(&mut self, cv_pb: ConvPb, eager_delta: bool,
+                      t1: &Constr, t2: &Constr) -> ConvResult<()> {
+        let Env { ref mut stratification, ref mut globals, ref mut rel_context } = *self;
+        let univ = stratification.universes();
+        let enga = stratification.engagement();
+        let ref ctx = Context::new();
+        let mut infos =
+            Infos::create(if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
+                          globals,
+                          rel_context.iter_mut())?;
+        let v1 = t1.inject(ctx)?;
+        let v2 = t2.inject(ctx)?;
+        infos.ccnv(univ, enga, cv_pb, &Lift::id(), &Lift::id(), v1, v2, (), (), ctx)
+    }
+
+    fn fconv(&mut self, cv_pb: ConvPb, eager_delta: bool,
+             t1: &Constr, t2: &Constr) -> ConvResult<()> {
+        if t1.eq_constr(t2) { Ok(()) }
+        else { self.clos_fconv(cv_pb, eager_delta, t1, t2) }
+    }
+
+    pub fn conv(&mut self, t1: &Constr, t2: &Constr) -> ConvResult<()> {
+        self.fconv(ConvPb::Conv, false, t1, t2)
+    }
+
+    pub fn conv_leq(&mut self, t1: &Constr, t2: &Constr) -> ConvResult<()> {
+        self.fconv(ConvPb::Cumul, false, t1, t2)
+    }
+
+    /// option for conversion : no compilation for the checker
+    pub fn vm_conv(&mut self, cv_pb: ConvPb, t1: &Constr, t2: &Constr) -> ConvResult<()> {
+        self.fconv(cv_pb, true, t1, t2)
+    }
+
+    /// Special-Purpose Reduction
+
+    /// pseudo-reduction rule:
+    ///
+    /// [hnf_prod_app env s (Prod(_,B)) N --> B[N]
+    ///
+    /// with an HNF on the first argument to produce a product.
+    ///
+    /// if this does not work, then we use the string S as part of our
+    /// error message.
+    fn hnf_prod_app(&mut self, t: Constr, n: &Constr) -> ConvResult<Constr> {
+        match t.whd_all(self)? {
+            Constr::Prod(o) => {
+                let (_, _, ref b) = *o;
+                Ok(b.subst1(n)?)
+            },
+            _ => Err(Box::new(ConvError::Anomaly("hnf_prod_app: Need a product".into()))),
+        }
+    }
+
+    /// Pseudo-reduction rule  Prod(x,A,B) a --> B[x\a]
+    pub fn hnf_prod_applist(&mut self, mut t: Constr, nl: &[Constr]) -> ConvResult<Constr> {
+        for n in nl.iter().rev() {
+            t = self.hnf_prod_app(t, n)?;
+        }
+        Ok(t)
+    }
+
+    /// Dealing with arities
+    ///
+    /// Recognizing products and arities modulo reduction
+
+    pub fn dest_prod(&mut self, mut c: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
+        let mut m = Vec::new();
+        loop {
+            let t = c.whd_all(self)?;
+            match t {
+                Constr::Prod(o) => {
+                    let (ref n, ref a, ref c0) = *o;
+                    let d = RDecl::LocalAssum(n.clone(), a.clone());
+                    self.push_rel(d.clone());
+                    m.push(d);
+                    c = c0.clone();
+                },
+                _ => { return Ok((m, t)) }
+            }
+        }
+    }
+
+    /// The same but preserving lets in the context, not internal ones.
+    pub fn dest_prod_assum(&mut self, mut ty: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
+        let mut l = Vec::new();
+        loop {
+            let rty = ty.whd_allnolet(self)?;
+            match rty {
+                Constr::Prod(o) => {
+                    let (ref x, ref t, ref c) = *o;
+                    let d = RDecl::LocalAssum(x.clone(), t.clone());
+                    self.push_rel(d.clone());
+                    l.push(d);
+                    ty = c.clone();
+                },
+                Constr::LetIn(o) => {
+                    let (ref x, ref b, ref t, ref c) = *o;
+                    let d = RDecl::LocalDef(x.clone(), b.clone(), ORef(Rc::from(t.clone())));
+                    self.push_rel(d.clone());
+                    l.push(d);
+                    ty = c.clone();
+                },
+                Constr::Cast(o) => {
+                    let (ref c, _, _) = *o;
+                    ty = c.clone();
+                },
+                _ => {
+                    let rty_ = rty.whd_all(self)?;
+                    if rty_.eq_constr(rty) { Ok(())
+                    else { y = rty_; }
+                },
+            }
+        }
+    }
+
+    pub fn dest_lam_assum(&mut self, mut ty: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
+        let mut l = Vec::new();
+        loop {
+            let rty = ty.whd_allnolet(self)?;
+            match rty {
+                Constr::Lambda(o) => {
+                    let (ref x, ref t, ref c) = *o;
+                    let d = RDecl::LocalAssum(x.clone(), t.clone());
+                    self.push_rel(d.clone());
+                    l.push(d);
+                    ty = c.clone();
+                },
+                Constr::LetIn(o) => {
+                    let (ref x, ref b, ref t, ref c) = *o;
+                    let d = RDecl::LocalDef(x.clone(), b.clone(), ORef(Rc::from(t.clone())));
+                    self.push_rel(d.clone());
+                    l.push(d);
+                    ty = c.clone();
+                },
+                Constr::Cast(o) => {
+                    let (ref c, _, _) = *o;
+                    ty = c.clone();
+                },
+                _ => { return Ok((l, rty)) },
+            }
+        }
+    }
+
+    pub fn dest_arity(&mut self, c: Constr) -> ConvResult<Arity> {
+        let (l, c) = self.dest_prod_assum(c)?;
+        match c {
+            Constr::Sort(s) => Ok((l, s)),
+            _ => Err(Box::new(ConvError::UserError("Not an arity".into()))),
+        }
     }
 }

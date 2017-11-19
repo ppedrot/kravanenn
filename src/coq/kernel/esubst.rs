@@ -26,7 +26,7 @@ For my own clarification, an intro to De Bruijn indices and explicit substitutio
 #[derive(Clone,Debug,Copy,Eq,Hash,PartialEq)]
 pub struct Idx(i32);
 
-#[derive(Clone,Debug,Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IdxError(());
 
 pub type IdxResult<T> = Result<T, IdxError>;
