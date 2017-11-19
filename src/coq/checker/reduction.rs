@@ -1,15 +1,19 @@
 use coq::checker::closure::{
     Context,
     FConstr,
+    FTerm,
     Infos,
     MRef,
     RedResult,
     Reds,
     Stack,
     StackMember,
+    TableKey,
+    TableKeyC,
 };
 use coq::checker::environ::{
     Env,
+    EnvError,
     Globals,
 };
 use coq::checker::univ::{
@@ -22,6 +26,9 @@ use coq::kernel::esubst::{
     IdxResult,
     Lift,
 };
+use core::convert::{
+    TryFrom,
+};
 use ocaml::de::{
     Array,
 };
@@ -30,6 +37,8 @@ use ocaml::values::{
     Constr,
     Cst,
     Engagement,
+    Fix,
+    Fix2,
     Ind,
     Instance,
     Sort,
@@ -50,10 +59,12 @@ enum ZL<'a, 'b> where 'b: 'a {
 struct LftConstrStack<'a, 'b>(Vec<ZL<'a, 'b>>) where 'b: 'a;
 
 pub enum ConvError {
+    Env(EnvError),
     Idx(IdxError),
     Univ(UnivError),
     NotConvertible,
     NotConvertibleVect(usize),
+    NotFound,
 }
 
 pub type ConvResult<T> = Result<T, ConvError>;
@@ -74,6 +85,12 @@ impl<'a, 'b> ::std::ops::Deref for LftConstrStack<'a, 'b> {
 impl<'a, 'b> ::std::ops::DerefMut for LftConstrStack<'a, 'b> {
     fn deref_mut(&mut self) -> &mut Vec<ZL<'a, 'b>> {
         &mut self.0
+    }
+}
+
+impl ::std::convert::From<EnvError> for ConvError {
+    fn from(e: EnvError) -> Self {
+        ConvError::Env(e)
     }
 }
 
@@ -220,6 +237,73 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
             }
         }
         return Ok(stk)
+    }
+
+    fn no_arg_available(&self) -> bool {
+        for z in self.iter() {
+            match *z {
+                StackMember::Update(_, _) | StackMember::Shift(_, _) => {},
+                StackMember::App(ref v) => { if v.len() != 0 { return false } },
+                StackMember::Proj(_, _, _, _, _) | StackMember::Case(_, _, _, _) |
+                StackMember::CaseT(_, _, _) | StackMember::Fix(_, _, _) => { return true },
+            }
+        }
+        return true
+    }
+
+    fn no_nth_arg_available(&self, mut n: usize) -> bool {
+        for z in self.iter() {
+            match *z {
+                StackMember::Update(_, _) | StackMember::Shift(_, _) => {},
+                StackMember::App(ref v) => {
+                    n = match n.checked_sub(v.len()) {
+                        Some(n) => n,
+                        None => { return false },
+                    };
+                },
+                StackMember::Proj(_, _, _, _, _) | StackMember::Case(_, _, _, _) |
+                StackMember::CaseT(_, _, _) | StackMember::Fix(_, _, _) => { return true },
+            }
+        }
+        return true
+    }
+
+    fn no_case_available(&self) -> bool {
+        for z in self.iter() {
+            match *z {
+                StackMember::Update(_, _) | StackMember::Shift(_, _) | StackMember::App(_) =>
+                    {},
+                StackMember::Proj(_, _, _, _, _) | StackMember::Case(_, _, _, _) |
+                StackMember::CaseT(_, _, _) => { return false },
+                StackMember::Fix(_, _, _) => { return true },
+            }
+        }
+        return true
+    }
+
+    /// Note: t must be type-checked beforehand!
+    fn in_whnf(&self, t: &FConstr<'a, 'b>) -> IdxResult<bool> {
+        Ok(match *t.fterm().expect("Tried to lift a locked term") {
+            FTerm::LetIn(_, _, _, _) | FTerm::Case(_, _, _, _) | FTerm::CaseT(_, _, _) |
+            FTerm::App(_, _) | FTerm::Clos(_, _) | FTerm::Lift(_, _) | FTerm::Cast(_, _, _) =>
+                false,
+            FTerm::Lambda(_, _, _) => self.no_arg_available(),
+            FTerm::Construct(_) => self.no_case_available(),
+            FTerm::CoFix(_, _, _) => self.no_case_available(),
+            FTerm::Fix(o, n, _) => {
+                let Fix(Fix2(ref ri, _), _) = **o;
+                // FIXME: Verify that ri[n] in bounds is checked at some point during
+                // typechecking.  If not, we must check for it here (we never produce terms
+                // that should make it fail the bounds check provided that ri and bds have the
+                // same length).
+                // TODO: Verify that ri[n] is within usize is checked at some point during
+                // typechecking.
+                let n = usize::try_from(ri[n])?;
+                self.no_nth_arg_available(n)
+            },
+            FTerm::Flex(_) | FTerm::Prod(_, _, _)/* | FTerm::EVar(_)*/ | FTerm::Ind(_) |
+            FTerm::Atom(_) | FTerm::Rel(_) | FTerm::Proj(_, _, _) => true,
+        })
     }
 }
 
@@ -430,5 +514,27 @@ impl Engagement {
             (_, _) => return Err(ConvError::NotConvertible),
         }
         return Ok(())
+    }
+}
+
+impl<'b> TableKeyC<'b> {
+    fn oracle_order(&self, fl2: &Self) -> bool {
+        match (*self, *fl2) {
+            (TableKey::ConstKey(_), TableKey::ConstKey(_)) => /* height c1 > height c2 */false,
+            (_, TableKey::ConstKey(_)) => true,
+            (_, _) => false,
+        }
+    }
+}
+
+impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> {
+    fn unfold_projection_infos<I, S>(&self, p: &'b Cst, b: bool,
+                                     i: I) -> ConvResult<StackMember<'a, 'b, I, S>> {
+        let pb = self.globals().lookup_projection(p).ok_or(ConvError::NotFound)??;
+        // TODO: Verify that npars and arg being within usize is checked at some
+        // point during typechecking.
+        let npars = usize::try_from(pb.npars).map_err(IdxError::from)?;
+        let arg = usize::try_from(pb.arg).map_err(IdxError::from)?;
+        Ok(StackMember::Proj(npars, arg, p, b, i))
     }
 }
