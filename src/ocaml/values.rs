@@ -161,7 +161,7 @@ pub struct Ind {
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Cons {
     /// designates the inductive type
-    #[serde(deserialize_state)] ind: Ind,
+    #[serde(deserialize_state)] pub ind: Ind,
     /// The index of the constructor.  Beware: indexing starts from 1.
     pub idx: Int,
 }

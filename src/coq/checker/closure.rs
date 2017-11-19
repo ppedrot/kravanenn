@@ -1058,6 +1058,10 @@ impl<'a, 'b, I, S> ::std::ops::DerefMut for Stack<'a, 'b, I, S> {
 }
 
 impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
+    pub fn new () -> Self {
+        Stack(Vec::new())
+    }
+
     fn push(&mut self, o: StackMember<'a, 'b, I, S>) {
         self.0.push(o);
     }
@@ -1396,14 +1400,14 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// (strip_update_shift_app produces a stack with only Zapp and Zshift items, and depth = sum
     /// of shifts in the stack).
     fn try_drop_parameters(&mut self, mut depth: Option<Idx>, mut n: usize,
-                           ctx: &'a Context<'a, 'b>) -> RedResult<()> {
+                           ctx: &'a Context<'a, 'b>) -> IdxResult<Option<()>> {
         // Drop should only succeed here if n == 0 (i.e. there were no additional parameters to
         // drop).  But we should never reach the end of the while loop unless there was no
         // StackMember::App in the stack, because if n = 0, ∀ q : usize, n ≤ q, which would
         // mean the App branches returned.  Since we don't actually *do* anything in the Shift
         // branch other than decrement depth, it doesn't affect whether n == 0 at the end, so we
         // can just check it at the beginning.
-        if n == 0 { return Ok(()) }
+        if n == 0 { return Ok(Some(())) }
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::App(args) => {
@@ -1421,7 +1425,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             self.append(aft);
                         }
                         self.reloc_rargs(depth, ctx)?;
-                        return Ok(());
+                        return Ok(Some(()));
                     }
                 },
                 StackMember::Shift(k, _) => {
@@ -1436,7 +1440,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
             }
         }
         // We exhausted the argument stack before we finished dropping all the parameters.
-        return Err(Box::new(RedError::NotFound))
+        return Ok(None)
     }
 
     /// Only call this on type-checked terms (otherwise the assertion may be false!)
@@ -1446,14 +1450,9 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// FIXME: Figure out a way to usefully incorporate "this term has been typechecked" into
     /// Rust's type system (maybe some sort of weird wrapper around Constr?).
     fn drop_parameters(&mut self, depth: Option<Idx>, n: usize,
-                       ctx: &'a Context<'a, 'b>) -> RedResult<()> {
-        let res = self.try_drop_parameters(depth, n, ctx);
-        if let Err(ref o) = res {
-            if let RedError::NotFound = **o {
-                panic!("We know n < stack_arg_size(self) if well-typed term");
-            }
-        }
-        res
+                       ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
+        self.try_drop_parameters(depth, n, ctx)
+            .map( |res| res.expect("We know n < stack_arg_size(self) if well-typed term") )
     }
 
     /// Projections and eta expansion
@@ -1475,15 +1474,40 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         (* strip_update_shift_app only produces Zapp and Zshift items *) */
 
     /// Must be called on a type-checked term.
+    ///
+    /// There is some subtlety around the handling of Not_found compared to the OCaml
+    /// implementation.  In Ocaml, try_drop_parameters can throw a Not_found, which may propagate
+    /// through eta_expand_ind_stack, and so can lookup_mind.  Additionally, eta_expand_ind_stack
+    /// throws Not_found explicitly if it turns out that the referenced ind isn't a primitive
+    /// record.
+    ///
+    /// In the Rust implementation, by contrast, we tentatively differentiate between two kinds of
+    /// Not_found errors: those that indicate an ill-constructed environment (the one from
+    /// lookup_mind, in this case, but also the failed lookup_projection in knh on Proj terms), and
+    /// those that may merely indicate that eta expansion is impossible (the constructor not being
+    /// a primitive record, or the constructor only being partially applied).
+    ///
+    /// The reason we do this is that Not_found is actually caught during conversion when one term
+    /// is a constructor and the other is some other term in weak-head normal form, and (in the
+    /// current Coq implementation) always interpreted as NotConvertible.  However, my suspicion is
+    /// that the catch is actually designed to catch the eta-expansion errors, not ill-formed
+    /// environment errors; otherwise, NotFound would presumably be interpreted as NotConvertible
+    /// in other cases as well, since (for example) projection lookup failure within a Proj could
+    /// be caught by the same catch.  Additionally, typechecking *does* appear to check that
+    /// Construct referencing an inductive that's not in the environment shouldn't happen,
+    /// regardless of conversion errors.
     pub fn eta_expand_ind_stack<'g>(globals: &Globals<'g>,
                                     ind: &'b Ind,
                                     m: FConstr<'a, 'b>,
                                     s: &mut Stack<'a, 'b, I, S>,
-                                    (f, s_): (FConstr<'a, 'b>, &mut Stack<'a, 'b, I, S>),
+                                    f: FConstr<'a, 'b>,
+                                    s_: &mut Stack<'a, 'b, I, S>,
                                     ctx: &'a Context<'a, 'b>) ->
-        RedResult<(Stack<'a, 'b, I, S>, Stack<'a, 'b, I, S>)>
+        RedResult<Option<(Stack<'a, 'b, I, S>, Stack<'a, 'b, I, S>)>>
         where 'g: 'b,
     {
+        // FIXME: Typechecking appears to verify that this should always be found, so consider
+        // asserting here instead.
         let mib = globals.lookup_mind(&ind.name).ok_or(RedError::NotFound)?;
         match mib.record {
             Some(Some(RecordBody(_, ref projs, _))) if mib.finite != Finite::CoFinite => {
@@ -1494,7 +1518,9 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 let right = f.fapp_stack(s_, ctx)?;
                 let (depth, mut args) = s.strip_update_shift_app(m, ctx)?;
                 // Try to drop the params, might fail on partially applied constructors.
-                args.try_drop_parameters(depth, pars, ctx)?;
+                if let None = args.try_drop_parameters(depth, pars, ctx)? {
+                    return Ok(None);
+                }
                 // expensive: makes a Vec.
                 let hstack: Vec<_> = projs.iter().map( |p| FConstr {
                     norm: Cell::new(RedState::Red), // right can't be a constructor though
@@ -1504,9 +1530,9 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 // FIXME: Ensure that projs is non-empty, since otherwise we'll have an empty
                 // ZApp.
                 // makes a Vec, but not that expensive.
-                Ok((args, Stack(vec![StackMember::App(hstack)])))
+                Ok(Some((args, Stack(vec![StackMember::App(hstack)]))))
             },
-            _ => Err(Box::new(RedError::NotFound)), // disallow eta-exp for non-primitive records
+            _ => Ok(None), // disallow eta-exp for non-primitive records
         }
     }
 

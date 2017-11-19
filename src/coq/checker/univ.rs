@@ -359,16 +359,16 @@ impl Univ {
     }
 }
 
-impl Universes {
+impl Instance {
     /// The universe should actually be in the universe map, or else it will return an error.
-    pub fn check_eq(&self, t1: &Instance, t2: &Instance) -> UnivResult<bool> {
+    pub fn check_eq(&self, t2: &Instance, g: &Universes) -> UnivResult<bool> {
         // FIXME: Pointer equality (depends on sharing)
         // t1 == t2 ||
-        if t1.len() != t2.len() { return Ok(false) }
+        if self.len() != t2.len() { return Ok(false) }
         // NOTE: We don't just use any / all because we want to propagate errors; there may be a
         // way to do both somehow.
-        for (u, v) in t1.iter().zip(t2.iter()) {
-            if !u.check_eq(v, self)? {
+        for (u, v) in self.iter().zip(t2.iter()) {
+            if !u.check_eq(v, g)? {
                 return Ok(false)
             }
         }
