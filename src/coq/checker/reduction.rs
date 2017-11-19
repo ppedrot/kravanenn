@@ -991,6 +991,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
         }
     }
 
+    /// Note: stk1 and stk2 must be type-checked beforehand!
     fn convert_stacks<I, S>(&mut self, univ: &Universes, enga: &Engagement,
                             lft1: &Lift, lft2: &Lift,
                             stk1: &Stack<'a, 'b, I, S>, stk2: &Stack<'a, 'b, I, S>,
@@ -1013,6 +1014,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
 }
 
 impl<'b, 'g> Env<'b, 'g> {
+    /// Note: t1 and t2 must be type-checked beforehand!
     fn clos_fconv(&mut self, cv_pb: ConvPb, eager_delta: bool,
                       t1: &Constr, t2: &Constr) -> ConvResult<()> {
         let Env { ref mut stratification, ref mut globals, ref mut rel_context } = *self;
@@ -1028,21 +1030,26 @@ impl<'b, 'g> Env<'b, 'g> {
         infos.ccnv(univ, enga, cv_pb, &Lift::id(), &Lift::id(), v1, v2, (), (), ctx)
     }
 
+    /// Note: t1 and t2 must be type-checked beforehand!
     fn fconv(&mut self, cv_pb: ConvPb, eager_delta: bool,
              t1: &Constr, t2: &Constr) -> ConvResult<()> {
         if t1.eq(t2) { Ok(()) }
         else { self.clos_fconv(cv_pb, eager_delta, t1, t2) }
     }
 
+    /// Note: t1 and t2 must be type-checked beforehand!
     pub fn conv(&mut self, t1: &Constr, t2: &Constr) -> ConvResult<()> {
         self.fconv(ConvPb::Conv, false, t1, t2)
     }
 
+    /// Note: t1 and t2 must be type-checked beforehand!
     pub fn conv_leq(&mut self, t1: &Constr, t2: &Constr) -> ConvResult<()> {
         self.fconv(ConvPb::Cumul, false, t1, t2)
     }
 
     /// option for conversion : no compilation for the checker
+    ///
+    /// Note: t1 and t2 must be type-checked beforehand!
     pub fn vm_conv(&mut self, cv_pb: ConvPb, t1: &Constr, t2: &Constr) -> ConvResult<()> {
         self.fconv(cv_pb, true, t1, t2)
     }
@@ -1079,6 +1086,7 @@ impl<'b, 'g> Env<'b, 'g> {
     ///
     /// Recognizing products and arities modulo reduction
 
+    /// Note: t1 and t2 must be type-checked beforehand!
     pub fn dest_prod(&mut self, mut c: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
         let mut m = Vec::new();
         loop {
@@ -1097,6 +1105,8 @@ impl<'b, 'g> Env<'b, 'g> {
     }
 
     /// The same but preserving lets in the context, not internal ones.
+    ///
+    /// Note: t1 and t2 must be type-checked beforehand!
     pub fn dest_prod_assum(&mut self, mut ty: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
         let mut l = Vec::new();
         loop {
@@ -1129,6 +1139,7 @@ impl<'b, 'g> Env<'b, 'g> {
         }
     }
 
+    /// Note: t1 and t2 must be type-checked beforehand!
     pub fn dest_lam_assum(&mut self, mut ty: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
         let mut l = Vec::new();
         loop {
@@ -1157,6 +1168,7 @@ impl<'b, 'g> Env<'b, 'g> {
         }
     }
 
+    /// Note: t1 and t2 must be type-checked beforehand!
     pub fn dest_arity(&mut self, c: Constr) -> ConvResult<Arity> {
         let (l, c) = self.dest_prod_assum(c)?;
         match c {
