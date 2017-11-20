@@ -126,10 +126,10 @@ pub type TableKeyC<'b> = TableKey<MRef<'b, PUniverses<Cst>>>;
 // TODO: Use custom KeyHash algorithm.
 struct KeyTable<'b, T>(HashMap<TableKeyC<'b>, T>);
 
-pub struct Infos<'a, 'b, 'g, T> where 'b: 'a, 'g: 'b, T: 'a {
+pub struct Infos<'b, T> {
   flags : Reds,
   // i_repr : 'a infos -> constr -> 'a;
-  globals: &'a mut Globals<'g>,
+  // globals: &'a mut Globals<'g>,
   // i_rels : int * (int * constr) list;
   rels: (u32, VecMap<&'b mut Constr>),
   tab: KeyTable<'b, T>,
@@ -242,7 +242,7 @@ enum Application<T> {
 }
 
 /// cache of constants: the body is computed only when needed.
-pub type ClosInfos<'a, 'b, 'g> = Infos<'a, 'b, 'g, FConstr<'a, 'b>>;
+pub type ClosInfos<'a, 'b> = Infos<'b, FConstr<'a, 'b>>;
 
 pub trait IRepr<'a, 'b> {
     fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
@@ -327,9 +327,11 @@ impl<'a, 'b> IRepr<'a, 'b> for FConstr<'a, 'b> {
     }
 }
 
-impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
-    pub fn ref_value_cache<'r>(&'r mut self, rf: TableKeyC<'b>,
-                               ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>> {
+impl<'a, 'b, T> Infos<'b, T> where T: IRepr<'a, 'b> {
+    pub fn ref_value_cache<'r, 'g>(&'r mut self, globals: &'r mut Globals<'g>, rf: TableKeyC<'b>,
+                                   ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>>
+            where 'g: 'b
+    {
         Ok(Some(match self.tab.entry(rf) {
             hash_map::Entry::Occupied(o) => o.into_mut(),
             hash_map::Entry::Vacant(v) => {
@@ -393,7 +395,7 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
                     },
                     // | VarKey(id) => raise Not_found
                     TableKey::ConstKey(cst) => {
-                        if let Some(Ok(body)) = self.globals.constant_value(cst) {
+                        if let Some(Ok(body)) = globals.constant_value(cst) {
                             v.insert(T::i_repr(body, ctx).map_err( |(e, _)| e)?)
                         } else {
                             // We either encountered a lookup error, or cst was not an
@@ -406,9 +408,11 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> where T: IRepr<'a, 'b> {
         }))
     }
 
-    pub fn unfold_reference<'r>(&'r mut self, rf: TableKeyC<'b>,
-                                ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>> {
-        self.ref_value_cache(rf, ctx)
+    pub fn unfold_reference<'r, 'g>(&'r mut self, globals: &'r mut Globals<'g>, rf: TableKeyC<'b>,
+                                    ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>>
+        where 'g: 'b,
+    {
+        self.ref_value_cache(globals, rf, ctx)
     }
 }
 
@@ -974,10 +978,12 @@ impl<'a, 'b> FConstr<'a, 'b> {
     /// Weak reduction
     /// [whd_val] is for weak head normalization
     /// Note: self must be typechecked beforehand!
-    pub fn whd_val<'r, 'g>(self, info: &mut ClosInfos<'a, 'b, 'g>,
-                           ctx: &'a Context<'a, 'b>) -> RedResult<Constr> {
+    pub fn whd_val<'r,'g>(self, info: &mut ClosInfos<'a, 'b>, globals: &mut Globals<'g>,
+                          ctx: &'a Context<'a, 'b>) -> RedResult<Constr>
+            where 'g: 'b,
+    {
         let mut stk = Stack(Vec::new());
-        let ft = stk.kh(info, self, ctx, (), ())?;
+        let ft = stk.kh(info, globals, self, ctx, (), ())?;
         Ok(Constr::of_fconstr(&ft, ctx)?)
     }
 }
@@ -1693,14 +1699,15 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// be caught by the same catch.  Additionally, typechecking *does* appear to check that
     /// Construct referencing an inductive that's not in the environment shouldn't happen,
     /// regardless of conversion errors.
-    pub fn eta_expand_ind_stack<'g>(globals: &Globals<'g>,
-                                    ind: &'b Ind,
-                                    m: FConstr<'a, 'b>,
-                                    s: &mut Stack<'a, 'b, I, S>,
-                                    f: FConstr<'a, 'b>,
-                                    s_: &mut Stack<'a, 'b, I, S>,
-                                    ctx: &'a Context<'a, 'b>) ->
-        RedResult<Option<(Stack<'a, 'b, I, S>, Stack<'a, 'b, I, S>)>>
+    pub fn eta_expand_ind_stack<'c, 'g>(globals: &Globals<'g>,
+                                       ind: &'b Ind,
+                                       m: FConstr<'a, 'b>,
+                                       s: &mut Stack<'a, 'b, I, S>,
+                                       f: FConstr<'c, 'b>,
+                                       s_: &mut Stack<'c, 'b, I, S>,
+                                       ctx: &'a Context<'a, 'b>,
+                                       ctx_: &'c Context<'c, 'b>) ->
+        RedResult<Option<(Stack<'a, 'b, I, S>, Stack<'c, 'b, I, S>)>>
         where 'g: 'b,
     {
         // FIXME: Typechecking appears to verify that this should always be found, so consider
@@ -1712,7 +1719,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 // arg1..argn ~= (proj1 t...projn t) where t = zip (f,s')
                 // TODO: Verify that this is checked at some point during typechecking.
                 let pars = usize::try_from(mib.nparams).map_err(IdxError::from)?;
-                let right = f.fapp_stack_mut(s_, ctx)?;
+                let right = f.fapp_stack_mut(s_, ctx_)?;
                 let (depth, mut args) = s.strip_update_shift_app(m, ctx)?;
                 // Try to drop the params, might fail on partially applied constructors.
                 if let None = args.try_drop_parameters(depth, pars, ctx)? {
@@ -1721,8 +1728,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 // expensive: makes a Vec.
                 let hstack: Vec<_> = projs.iter().map( |p| FConstr {
                     norm: Cell::new(RedState::Red), // right can't be a constructor though
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(p, false,
-                                                                          right.clone())))),
+                    term: Cell::new(Some(ctx_.term_arena.alloc(FTerm::Proj(p, false,
+                                                                           right.clone())))),
                 }).collect();
                 // FIXME: Ensure that projs is non-empty, since otherwise we'll have an empty
                 // ZApp.
@@ -1762,9 +1769,10 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// inductive).
     ///
     /// Note: m must be typechecked beforehand!
-    fn knh<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, m: FConstr<'a, 'b>,
+    fn knh<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b>, globals: &mut Globals<'g>,
+                   m: FConstr<'a, 'b>,
                    ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
-        where S: Clone, I: Clone,
+        where 'g: 'b, S: Clone, I: Clone,
     {
         let mut m: Cow<'a, FConstr<'a, 'b>> = Cow::Owned(m);
         loop {
@@ -1881,8 +1889,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         // error, especially since the env can presumably be mutated after
                         // typechecking.  So I'm choosing not to panic on either lookup failure or
                         // not finding a projection.  I'm open to changing this!
-                        let pb = info.globals.lookup_projection(p)
-                                             .ok_or(RedError::NotFound)??;
+                        let pb = globals.lookup_projection(p)
+                                        .ok_or(RedError::NotFound)??;
                         if let Cow::Borrowed(m) = m {
                             // NOTE: We probably only want to bother updating this reference if
                             // it's shared, right?
@@ -1911,10 +1919,10 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// The same for pure terms
     ///
     /// Note: m must be typechecked beforehand!
-    fn knht<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>,
+    fn knht<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b>, globals: &mut Globals<'g>,
                     env: &Subs<FConstr<'a, 'b>>, mut t: &'b Constr,
                     ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
-        where S: Clone, I: Clone,
+        where 'g: 'b, S: Clone, I: Clone,
     {
         loop {
             match *t {
@@ -1932,7 +1940,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 Constr::Fix(_) => { // laziness
                     // FIXME: Are we creating a term here and then immediately
                     // destroying it?
-                    return self.knh(info, env.mk_clos2(t, ctx)?, ctx, i, s)
+                    return self.knh(info, globals, env.mk_clos2(t, ctx)?, ctx, i, s)
                 },
                 Constr::Cast(ref o) => {
                     let (_, _, ref a) = **o;
@@ -1941,12 +1949,12 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 Constr::Rel(n) => {
                     // TODO: Might know n is NonZero if it's been typechecked?
                     let n = Idx::new(NonZero::new(n).ok_or(IdxError::from(NoneError))?)?;
-                    return self.knh(info, env.clos_rel(n, ctx)?, ctx, i, s)
+                    return self.knh(info, globals, env.clos_rel(n, ctx)?, ctx, i, s)
                 },
                 Constr::Proj(_) => { // laziness
                     // FIXME: Are we creating a term here and then immediately
                     // destroying it?
-                    return self.knh(info, env.mk_clos2(t, ctx)?, ctx, i, s)
+                    return self.knh(info, globals, env.mk_clos2(t, ctx)?, ctx, i, s)
                 },
                 Constr::Lambda(_) | Constr::Prod(_) | Constr::Construct(_) |
                 Constr::CoFix(_) | Constr::Ind(_) | Constr::LetIn(_) |
@@ -1959,9 +1967,10 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// Computes a weak head normal form from the result of knh.
     ///
     /// Note: m must be typechecked beforehand!
-    pub fn knr<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, mut m: FConstr<'a, 'b>,
+    pub fn knr<'r, 'g>(&mut self, info: &'r mut ClosInfos<'a, 'b>, globals: &'r mut Globals<'g>,
+                       mut m: FConstr<'a, 'b>,
                        ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
-        where S: Clone, I: Clone,
+        where 'g: 'b, S: Clone, I: Clone,
     {
         loop {
             let t = if let Some(t) = m.fterm() { t } else { return Ok(m) };
@@ -1970,13 +1979,13 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     match self.get_args(tys, f, e.clone() /* expensive */, ctx)? {
                         Application::Full(e) => {
                             // Mutual tail recursion is fine in OCaml, but not Rust.
-                            m = self.knht(info, &e, f, ctx, i.clone(), s.clone())?;
+                            m = self.knht(info, globals, &e, f, ctx, i.clone(), s.clone())?;
                         },
                         Application::Partial(lam) => return Ok(lam),
                     }
                 },
                 FTerm::Flex(rf) if info.flags.contains(Reds::DELTA) => {
-                    let v = match info.ref_value_cache(rf, ctx)? {
+                    let v = match info.ref_value_cache(globals, rf, ctx)? {
                         Some(v) => {
                             // TODO: Consider somehow keeping a reference alive here (maybe by
                             // allocating the term in an arena).  This is the only place (I
@@ -2003,7 +2012,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         }
                     };
                     // Mutual tail recursion is fine in OCaml, but not Rust.
-                    m = self.knh(info, v, ctx, i.clone(), s.clone())?;
+                    m = self.knh(info, globals, v, ctx, i.clone(), s.clone())?;
                 },
                 FTerm::Construct(o) if info.flags.contains(Reds::IOTA) => {
                     let c = ((*o).0).0.idx;
@@ -2034,7 +2043,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             self.extend(args.0.into_iter());
                             // Mutual tail recursion is fine in OCaml, but not Rust.
                             // FIXME: Verify that after typechecking, c > 0.
-                            m = self.knht(info, &env, &br[c - 1], ctx, i, s.clone())?;
+                            m = self.knht(info, globals, &env, &br[c - 1], ctx, i, s.clone())?;
                         },
                         StackMember::Fix(fx, par, i) => {
                             let rarg = m.fapp_stack_mut(&mut args, ctx)?;
@@ -2045,13 +2054,13 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                                 .expect("Tried to lift a locked term")
                                 .contract_fix_vect(ctx)?;
                             // Mutual tail recursion is fine in OCaml, but not Rust.
-                            m = self.knht(info, &fxe, fxbd, ctx, i, s.clone())?;
+                            m = self.knht(info, globals, &fxe, fxbd, ctx, i, s.clone())?;
                         },
                         StackMember::Proj(n, m_, _, _, i) => {
                             args.drop_parameters(depth, n, ctx)?;
                             let rarg = args.project_nth_arg(m_);
                             // Mutual tail recursion is fine in OCaml, but not Rust.
-                            m = self.knh(info, rarg, ctx, i, s.clone())?;
+                            m = self.knh(info, globals, rarg, ctx, i, s.clone())?;
                         },
                         _ => {
                             // It was fine on the stack before, so it should be fine now.
@@ -2071,7 +2080,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                                 .contract_fix_vect(ctx)?;
                             self.extend(args.0.into_iter());
                             // Mutual tail recursion is fine in OCaml, but not Rust.
-                            m = self.knht(info, &fxe, fxbd, ctx, i.clone(), s.clone())?;
+                            m = self.knht(info, globals, &fxe, fxbd, ctx, i.clone(), s.clone())?;
                         },
                         Some(_) => {
                             self.extend(args.0.into_iter());
@@ -2089,7 +2098,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     // makes a Vec, but not that expensive.
                     e.cons(vec![v.clone()])?;
                     // Mutual tail recursion is fine in OCaml, but not Rust.
-                    m = self.knht(info, &e, bd, ctx, i.clone(), s.clone())?;
+                    m = self.knht(info, globals, &e, bd, ctx, i.clone(), s.clone())?;
                 },
                 _ => return Ok(m)
             }
@@ -2099,19 +2108,21 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// Computes the weak head normal form of a term
     ///
     /// Note: m must be typechecked beforehand!
-    pub fn kni<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, m: FConstr<'a, 'b>,
+    pub fn kni<'r, 'g>(&'r mut self, info: &mut ClosInfos<'a, 'b>, globals: &'r mut Globals<'g>,
+                       m: FConstr<'a, 'b>,
                        ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
-        where S: Clone, I: Clone,
+        where 'g: 'b, S: Clone, I: Clone,
     {
-        let hm = self.knh(info, m, ctx, i.clone(), s.clone())?;
-        self.knr(info, hm, ctx, i, s)
+        let hm = self.knh(info, globals, m, ctx, i.clone(), s.clone())?;
+        self.knr(info, globals, hm, ctx, i, s)
     }
 
-    fn kh<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, v: FConstr<'a, 'b>,
+    fn kh<'r, 'g>(&mut self, info: &'r mut ClosInfos<'a, 'b>, globals: &'r mut Globals<'g>,
+                  v: FConstr<'a, 'b>,
                   ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
-        where S: Clone, I: Clone,
+        where 'g: 'b, S: Clone, I: Clone,
     {
-        Ok(self.kni(info, v, ctx, i, s)?
+        Ok(self.kni(info, globals, v, ctx, i, s)?
                .fapp_stack_mut(self, ctx)?)
     }
 
@@ -2119,11 +2130,13 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// [whd_stack] performs weak head normalization in a given stack. It
     /// stops whenever a reduction is blocked.
     /// Note: v must be typechecked beforehand!
-    pub fn whd_stack<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b, 'g>, v: FConstr<'a, 'b>,
+    pub fn whd_stack<'r, 'g>(&mut self, info: &'r mut ClosInfos<'a, 'b>,
+                             globals: &'r mut Globals<'g>,
+                             v: FConstr<'a, 'b>,
                              ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
-        where S: Clone, I: Clone,
+        where 'g: 'b, S: Clone, I: Clone,
     {
-        let k = self.kni(info, v, ctx, i, s)?;
+        let k = self.kni(info, globals, v, ctx, i, s)?;
         // expensive -- we avoid a bit of the work by not cloning the stack, but in general we need
         // to clone all of its contents when we zip up the remaining terms, if there are any
         // updates.
@@ -2338,7 +2351,7 @@ impl Constr {
     }
 }
 
-impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> {
+impl<'a, 'b, T> Infos<'b, T> {
     fn defined_rels<I>(rel_context: I) -> IdxResult<(u32, VecMap<&'b mut Constr>)>
         where I: Iterator<Item=&'b mut RDecl>
     {
@@ -2361,23 +2374,13 @@ impl<'a, 'b, 'g, T> Infos<'a, 'b, 'g, T> {
         Ok((i, rels?))
     }
 
-    pub fn mind_equiv(&self, ind1: &Ind, ind2: &Ind) -> bool {
-        self.globals.mind_equiv(ind1, ind2)
-    }
-
-    pub fn create<I>(flgs: Reds, globals: &'a mut Globals<'g>,
-                 rel_context: I) -> IdxResult<Self>
+    pub fn create<I>(flgs: Reds, rel_context: I) -> IdxResult<Self>
         where I: Iterator<Item=&'b mut RDecl>
     {
         Ok(Infos {
             flags: flgs,
-            globals: globals,
             rels: Self::defined_rels(rel_context)?,
             tab: KeyTable(HashMap::with_capacity(17)),
         })
-    }
-
-    pub fn globals(&self) -> &Globals<'g> {
-        self.globals
     }
 }

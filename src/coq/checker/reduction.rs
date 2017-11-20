@@ -1,4 +1,5 @@
 use coq::checker::closure::{
+    ClosInfos,
     Context,
     FConstr,
     FTerm,
@@ -166,7 +167,7 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
         } else { Ok(()) }
     }
 
-    fn compare_shape(&self, stk: &Self) -> IdxResult<bool> {
+    fn compare_shape<'c>(&self, stk: &Stack<'c, 'b, Inst, Shft>) -> IdxResult<bool> {
         let mut bal = 0isize;
         let mut stk1 = self.iter();
         let mut stk2 = stk.iter();
@@ -261,73 +262,6 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
         }
         return Ok(stk)
     }
-
-    fn no_arg_available(&self) -> bool {
-        for z in self.iter() {
-            match *z {
-                StackMember::Update(_, _) | StackMember::Shift(_, _) => {},
-                StackMember::App(ref v) => { if v.len() != 0 { return false } },
-                StackMember::Proj(_, _, _, _, _) | StackMember::Case(_, _, _, _) |
-                StackMember::CaseT(_, _, _) | StackMember::Fix(_, _, _) => { return true },
-            }
-        }
-        return true
-    }
-
-    fn no_nth_arg_available(&self, mut n: usize) -> bool {
-        for z in self.iter() {
-            match *z {
-                StackMember::Update(_, _) | StackMember::Shift(_, _) => {},
-                StackMember::App(ref v) => {
-                    n = match n.checked_sub(v.len()) {
-                        Some(n) => n,
-                        None => { return false },
-                    };
-                },
-                StackMember::Proj(_, _, _, _, _) | StackMember::Case(_, _, _, _) |
-                StackMember::CaseT(_, _, _) | StackMember::Fix(_, _, _) => { return true },
-            }
-        }
-        return true
-    }
-
-    fn no_case_available(&self) -> bool {
-        for z in self.iter() {
-            match *z {
-                StackMember::Update(_, _) | StackMember::Shift(_, _) | StackMember::App(_) =>
-                    {},
-                StackMember::Proj(_, _, _, _, _) | StackMember::Case(_, _, _, _) |
-                StackMember::CaseT(_, _, _) => { return false },
-                StackMember::Fix(_, _, _) => { return true },
-            }
-        }
-        return true
-    }
-
-    /// Note: t must be type-checked beforehand!
-    fn in_whnf(&self, t: &FConstr<'a, 'b>) -> IdxResult<bool> {
-        Ok(match *t.fterm().expect("Tried to lift a locked term") {
-            FTerm::LetIn(_, _, _, _) | FTerm::Case(_, _, _, _) | FTerm::CaseT(_, _, _) |
-            FTerm::App(_, _) | FTerm::Clos(_, _) | FTerm::Lift(_, _) | FTerm::Cast(_, _, _) =>
-                false,
-            FTerm::Lambda(_, _, _) => self.no_arg_available(),
-            FTerm::Construct(_) => self.no_case_available(),
-            FTerm::CoFix(_, _, _) => self.no_case_available(),
-            FTerm::Fix(o, n, _) => {
-                let Fix(Fix2(ref ri, _), _) = **o;
-                // FIXME: Verify that ri[n] in bounds is checked at some point during
-                // typechecking.  If not, we must check for it here (we never produce terms
-                // that should make it fail the bounds check provided that ri and bds have the
-                // same length).
-                // TODO: Verify that ri[n] is within usize is checked at some point during
-                // typechecking.
-                let n = usize::try_from(ri[n])?;
-                self.no_nth_arg_available(n)
-            },
-            FTerm::Flex(_) | FTerm::Prod(_, _, _)/* | FTerm::EVar(_)*/ | FTerm::Ind(_) |
-            FTerm::Atom(_) | FTerm::Rel(_) | FTerm::Proj(_, _, _) => true,
-        })
-    }
 }
 
 impl Constr {
@@ -352,10 +286,10 @@ impl Constr {
                 let mut globals = Globals::default();
                 *self = {
                     let ref ctx = Context::new();
-                    let mut infos = Infos::create(Reds::BETAIOTAZETA, &mut globals,
+                    let mut infos = Infos::create(Reds::BETAIOTAZETA,
                                                   iter::empty())?;
                     let v = self.inject(ctx)?;
-                    v.whd_val(&mut infos, ctx)?
+                    v.whd_val(&mut infos, &mut globals, ctx)?
                 };
                 Ok(())
             }
@@ -376,10 +310,10 @@ impl Constr {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
                 *self = {
                     let ref ctx = Context::new();
-                    let mut infos = Infos::create(Reds::BETADELTAIOTA, globals,
+                    let mut infos = Infos::create(Reds::BETADELTAIOTA,
                                                   rel_context.iter_mut())?;
                     let v = self.inject(ctx)?;
-                    v.whd_val(&mut infos, ctx)?
+                    v.whd_val(&mut infos, globals, ctx)?
                 };
                 Ok(())
             }
@@ -400,10 +334,10 @@ impl Constr {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
                 *self = {
                     let ref ctx = Context::new();
-                    let mut infos = Infos::create(Reds::BETADELTAIOTANOLET, globals,
+                    let mut infos = Infos::create(Reds::BETADELTAIOTANOLET,
                                                   rel_context.iter_mut())?;
                     let v = self.inject(ctx)?;
-                    v.whd_val(&mut infos, ctx)?
+                    v.whd_val(&mut infos, globals, ctx)?
                 };
                 Ok(())
             }
@@ -460,24 +394,24 @@ impl Universes {
     }
 }
 
-fn compare_stacks<'a, 'b, I, S, T, F, FMind>
+fn compare_stacks<'a, 'c, 'b, I, S, T, F, FMind>
     (f: &mut F, fmind: &mut FMind,
      lft1: &mut Lift, stk1: &Stack<'a, 'b, I, S>,
-     lft2: &mut Lift, stk2: &Stack<'a, 'b, I, S>,
-     ctx: &'a Context<'a, 'b>,
+     lft2: &mut Lift, stk2: &Stack<'c, 'b, I, S>,
+     ctx: &'a Context<'a, 'b>, ctx_: &'c Context<'c, 'b>,
      env: &mut T) -> ConvResult<()>
     where
-        F: FnMut(&mut T, (&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>)) -> ConvResult<()>,
+        F: FnMut(&mut T, (&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'c, 'b>)) -> ConvResult<()>,
         FMind: FnMut(&T, &Ind, &Ind) -> bool,
 {
     /// Prerequisite: call with stacks of the same shape.
-    fn cmp_rec<'a, 'b, T, F, FMind>
+    fn cmp_rec<'a, 'c, 'b, T, F, FMind>
         (f: &mut F, fmind: &mut FMind,
          pstk1: LftConstrStack<'a, 'b>,
-         pstk2: LftConstrStack<'a, 'b>,
+         pstk2: LftConstrStack<'c, 'b>,
          env: &mut T) -> ConvResult<()>
         where
-            F: FnMut(&mut T, (&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'a, 'b>)) -> ConvResult<()>,
+            F: FnMut(&mut T, (&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'c, 'b>)) -> ConvResult<()>,
             FMind: FnMut(&T, &Ind, &Ind) -> bool,
     {
         // The stacks have the same shape, so we don't need to worry about these mismatching.
@@ -517,7 +451,7 @@ fn compare_stacks<'a, 'b, I, S, T, F, FMind>
     }
 
     if stk1.compare_shape(stk2)? {
-        cmp_rec(f, fmind, stk1.to_pure(lft1, ctx)?, stk2.to_pure(lft2, ctx)?, env)
+        cmp_rec(f, fmind, stk1.to_pure(lft1, ctx)?, stk2.to_pure(lft2, ctx_)?, env)
     } else {
         Err(Box::new(ConvError::NotConvertible))
     }
@@ -573,40 +507,49 @@ impl<'b> TableKeyC<'b> {
     }
 }
 
-impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
-    fn unfold_projection_infos<I, S>(&self, p: &'b Cst, b: bool,
-                                     i: I) -> ConvResult<StackMember<'a, 'b, I, S>> {
-        let pb = self.globals().lookup_projection(p)
-                               .ok_or_else(|| Box::new(ConvError::NotFound))??;
+impl<'g> Globals<'g> {
+    fn unfold_projection_infos<'a, 'b, I, S>(&self, p: &'b Cst, b: bool,
+                                             i: I) -> ConvResult<StackMember<'a, 'b, I, S>> {
+        let pb = self.lookup_projection(p)
+                     .ok_or_else(|| Box::new(ConvError::NotFound))??;
         // TODO: Verify that npars and arg being within usize is checked at some
         // point during typechecking.
         let npars = usize::try_from(pb.npars).map_err(IdxError::from)?;
         let arg = usize::try_from(pb.arg).map_err(IdxError::from)?;
         Ok(StackMember::Proj(npars, arg, p, b, i))
     }
+}
 
+impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
     /// Conversion between [lft1]term1 and [lft2]term2.
     /// Note: term1 and term2 must be type-checked beforehand!
-    fn ccnv<I, S>(&mut self, univ: &Universes, enga: &Engagement, cv_pb: ConvPb,
-                  lft1: &Lift, lft2: &Lift, term1: FConstr<'a, 'b>, term2: FConstr<'a, 'b>,
-                  i: I, s: S, ctx: &'a Context<'a, 'b>) -> ConvResult<()>
+    fn ccnv<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'c, 'b>,
+                      univ: &Universes, enga: &Engagement,
+                      globals: &'r mut Globals<'g>, cv_pb: ConvPb,
+                      lft1: &Lift, lft2: &Lift, term1: FConstr<'a, 'b>, term2: FConstr<'c, 'b>,
+                      i: I, s: S,
+                      ctx: &'a Context<'a, 'b>, ctx_: &'c Context<'c, 'b>) -> ConvResult<()>
         where
             I: Clone,
             S: Clone,
     {
-        self.eqappr(univ, enga, cv_pb,
+        self.eqappr(infos_, univ, enga, globals, cv_pb,
                     lft1, term1, &mut Stack::new(),
                     lft2, term2, &mut Stack::new(),
-                    i, s, ctx)
+                    i, s, ctx, ctx_)
     }
 
     /// Conversion between [lft1](hd1 v1) and [lft2](hd2 v2)
     /// Note: term1 and term2 must be type-checked beforehand in the context of stk1 and stk2,
     /// respectively!
-    fn eqappr<I, S>(&mut self, univ: &Universes, enga: &Engagement, mut cv_pb: ConvPb,
-                    lft1: &Lift, mut hd1: FConstr<'a, 'b>, v1: &mut Stack<'a, 'b, I, S>,
-                    lft2: &Lift, mut hd2: FConstr<'a, 'b>, v2: &mut Stack<'a, 'b, I, S>,
-                    i: I, s: S, ctx: &'a Context<'a, 'b>) -> ConvResult<()>
+    fn eqappr<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'c, 'b>,
+                        univ: &Universes, enga: &Engagement,
+                        globals: &'r mut Globals<'g>, mut cv_pb: ConvPb,
+                        lft1: &Lift, mut hd1: FConstr<'a, 'b>, v1: &mut Stack<'a, 'b, I, S>,
+                        lft2: &Lift, mut hd2: FConstr<'c, 'b>, v2: &mut Stack<'c, 'b, I, S>,
+                        i: I, s: S,
+                        ctx: &'a Context<'a, 'b>,
+                        ctx_: &'c Context<'c, 'b>) -> ConvResult<()>
         where
             I: Clone,
             S: Clone,
@@ -625,15 +568,23 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
             // Control.check_for_interrupt ();
 
             // First head reduce both terms
-            loop {
-                hd1 = v1.whd_stack(self, hd1, ctx, i.clone(), s.clone())?;
-                hd2 = v2.whd_stack(self, hd2, ctx, i.clone(), s.clone())?;
-                // Now, whd_stack on term2 might have modified st1 (due to sharing),
-                // and st1 might not be in whnf anymore. If so, we iterate ccnv.
-                // FIXME: Actually prove the above maybe?  Or maybe it's not true and this can loop
-                // forever.  Alternately, maybe fix this in a less ad hoc way?
-                if v1.in_whnf(&hd1)? { break }
-            }
+            // NOTE: In the OCaml implementation, we loop here because whd_stack on term2 might
+            // have modified st1 (due to sharing), and st1 might not be in whnf anymore.  However,
+            // in the Rust implementation, we can guarantee that this is not the case, because they
+            // are using separate resources.  We guarantee this by requiring them to be at
+            // different parametric lifetimes, so we never use (for example) a term allocated in
+            // ctx with v2.  As a result, we know that in order to modify an FTerm created in ctx,
+            // you need a reference with lifetime 'a to an FTerm<'a, 'b>; but there's no way such a
+            // reference could work with 'c unless 'a = 'c, and we know 'a ≠ 'c because we only
+            // call this function initially with arenas at incompatible lifetimes (through
+            // clos_fconv).  The only other way to make is_whnf fail would be to change a Fix
+            // Constr to something else, and the only way we change Constrs in a shared way is
+            // through mutable references in Globals, which only change monotonically via forcing;
+            // since they are always mutated before they're returned, and never mutated again, such
+            // references can't become valid afterwards if they're not valid already, so looping
+            // wouldn't help there.
+            hd1 = v1.whd_stack(self, globals, hd1, ctx, i.clone(), s.clone())?;
+            hd2 = v2.whd_stack(infos_, globals, hd2, ctx_, i.clone(), s.clone())?;
             // compute the lifts that apply to the head of the term (hd1 and hd2)
             // expensive, but shouldn't outlive this block.
             let mut el1 = lft1.as_ref().clone();
@@ -659,7 +610,8 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                 // 2 indices, known to be bound to no constant.
                 (&FTerm::Rel(n), &FTerm::Rel(m)) => {
                     return if el1.reloc_rel(n)? == el2.reloc_rel(m)? {
-                        self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx)
+                        self.convert_stacks(infos_, univ, enga, globals,
+                                            &lft1, &lft2, v1, v2, i, s, ctx, ctx_)
                     } else { Err(Box::new(ConvError::NotConvertible)) }
                 },
                 // 2 constants or 2 defined rels (no locally defined vars in the checker)
@@ -667,39 +619,40 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     // First try intentional equality
                     // TODO: This seems like it might be a sneakily slow step... investigate.
                     let res = if fl1 == fl2 {
-                        self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2,
-                                            i.clone(), s.clone(), ctx)
+                        self.convert_stacks(infos_, univ, enga, globals,
+                                            &lft1, &lft2, v1, v2,
+                                            i.clone(), s.clone(), ctx, ctx_)
                     } else { Err(Box::new(ConvError::NotConvertible)) };
                     match res {
                         Err(ref o) if **o == ConvError::NotConvertible => {
                             // else the oracle tells which constant is to be expanded.
                             if fl1.oracle_order(&fl2) {
-                                match self.unfold_reference(fl1, ctx)?
+                                match self.unfold_reference(globals, fl1, ctx)?
                                           .map( |def1| def1.clone() ) {
                                     Some(def1) => {
-                                        hd1 = v1.whd_stack(self, def1, ctx,
+                                        hd1 = v1.whd_stack(self, globals, def1, ctx,
                                                            i.clone(), s.clone())?;
                                     },
-                                    None => match self.unfold_reference(fl2, ctx)?
-                                                      .map( |def2| def2.clone() ) {
+                                    None => match infos_.unfold_reference(globals, fl2, ctx_)?
+                                                        .map( |def2| def2.clone() ) {
                                         Some(def2) => {
-                                            hd2 = v2.whd_stack(self, def2, ctx,
+                                            hd2 = v2.whd_stack(infos_, globals, def2, ctx_,
                                                                i.clone(), s.clone())?;
                                         },
                                         None => return Err(Box::new(ConvError::NotConvertible)),
                                     },
                                 }
                             } else {
-                                match self.unfold_reference(fl2, ctx)?
-                                          .map( |def2| def2.clone() ) {
+                                match infos_.unfold_reference(globals, fl2, ctx_)?
+                                            .map( |def2| def2.clone() ) {
                                     Some(def2) => {
-                                        hd2 = v2.whd_stack(self, def2, ctx,
+                                        hd2 = v2.whd_stack(infos_, globals, def2, ctx_,
                                                            i.clone(), s.clone())?;
                                     },
-                                    None => match self.unfold_reference(fl1, ctx)?
+                                    None => match self.unfold_reference(globals, fl1, ctx)?
                                                       .map( |def1| def1.clone() ) {
                                         Some(def1) => {
-                                            hd1 = v1.whd_stack(self, def1, ctx,
+                                            hd1 = v1.whd_stack(self, globals, def1, ctx,
                                                                i.clone(), s.clone())?;
                                         },
                                         None => return Err(Box::new(ConvError::NotConvertible)),
@@ -713,15 +666,15 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     // Loop through again.
                 },
                 (&FTerm::Proj(p1, b1, ref def1), _) => {
-                    let s1 = self.unfold_projection_infos(p1, b1, i.clone())?;
+                    let s1 = globals.unfold_projection_infos(p1, b1, i.clone())?;
                     v1.push(s1);
-                    hd1 = v1.whd_stack(self, def1.clone(), ctx, i.clone(), s.clone())?;
+                    hd1 = v1.whd_stack(self, globals, def1.clone(), ctx, i.clone(), s.clone())?;
                     // Loop through and try again with the projection unfolded.
                 },
                 (_, &FTerm::Proj(p2, b2, ref def2)) => {
-                    let s2 = self.unfold_projection_infos(p2, b2, i.clone())?;
+                    let s2 = globals.unfold_projection_infos(p2, b2, i.clone())?;
                     v2.push(s2);
-                    hd2 = v2.whd_stack(self, def2.clone(), ctx, i.clone(), s.clone())?;
+                    hd2 = v2.whd_stack(infos_, globals, def2.clone(), ctx_, i.clone(), s.clone())?;
                     // Loop through and try again with the projection unfolded.
                 },
                 // other constructors
@@ -731,11 +684,11 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     // we throw them away
                     assert!(v1.is_empty() && v2.is_empty());
                     let (_, ty1, bd1) = FTerm::dest_flambda(Subs::mk_clos, ty1, b1, e1, ctx)?;
-                    let (_, ty2, bd2) = FTerm::dest_flambda(Subs::mk_clos, ty2, b2, e2, ctx)?;
+                    let (_, ty2, bd2) = FTerm::dest_flambda(Subs::mk_clos, ty2, b2, e2, ctx_)?;
                     // FIXME: Ew, non-tail recursion!  Can we do the same trick we do for Proj
                     // somehow?
-                    self.ccnv(univ, enga, ConvPb::Conv, &el1, &el2, ty1, ty2,
-                              i.clone(), s.clone(), ctx)?;
+                    self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2, ty1, ty2,
+                              i.clone(), s.clone(), ctx, ctx_)?;
                     el1.lift()?;
                     el2.lift()?;
                     // Avoid tail recursion in Rust (this is the same as calling ccnv in tail
@@ -759,8 +712,9 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     // Luo's system
                     // FIXME: Ew, non-tail recursion!  Can we do the same trick we do for Proj
                     // somehow?
-                    self.ccnv(univ, enga, ConvPb::Conv, &el1, &el2, c1.clone(), c_1.clone(),
-                              i.clone(), s.clone(), ctx)?;
+                    self.ccnv(infos_, univ, enga, globals,
+                              ConvPb::Conv, &el1, &el2, c1.clone(), c_1.clone(),
+                              i.clone(), s.clone(), ctx, ctx_)?;
                     el1.lift()?;
                     el2.lift()?;
                     // Avoid tail recursion in Rust (this is the same as calling ccnv in tail
@@ -783,7 +737,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         return Err(Box::new(ConvError::Anomaly(E.into())))
                     }
                     let (_, _, bd1) = FTerm::dest_flambda(Subs::mk_clos, ty1, b1, e1, ctx)?;
-                    v2.eta_expand_stack(ctx, s.clone());
+                    v2.eta_expand_stack(ctx_, s.clone());
                     let mut el1 = lft1.into_owned();
                     el1.lift()?;
                     let mut el2 = lft2.into_owned();
@@ -803,7 +757,7 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         const E : &'static str = "conversion was given an unreduced term (FLamda)";
                         return Err(Box::new(ConvError::Anomaly(E.into())));
                     }
-                    let (_, _, bd2) = FTerm::dest_flambda(Subs::mk_clos, ty2, b2, e2, ctx)?;
+                    let (_, _, bd2) = FTerm::dest_flambda(Subs::mk_clos, ty2, b2, e2, ctx_)?;
                     v1.eta_expand_stack(ctx, s.clone());
                     let mut el1 = lft1.into_owned();
                     el1.lift()?;
@@ -819,10 +773,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     // Loop through again.
                 },
                 // only one constant or defined rel (no defined vars in the checker)
-                (&FTerm::Flex(fl1), c2) => match self.unfold_reference(fl1, ctx)?
+                (&FTerm::Flex(fl1), c2) => match self.unfold_reference(globals, fl1, ctx)?
                                                      .map( |def1| def1.clone() ) {
                     Some(def1) => {
-                        hd1 = v1.whd_stack(self, def1, ctx, i.clone(), s.clone())?;
+                        hd1 = v1.whd_stack(self, globals, def1, ctx, i.clone(), s.clone())?;
                     },
                     None => match *c2 {
                         FTerm::Construct(o) => {
@@ -830,11 +784,12 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                             // NOTE: We do not catch exactly the same errors that we do in the
                             // OCaml implementation here.  See eta_expand_ind_stack definition for
                             // more information.
-                            match Stack::eta_expand_ind_stack(self.globals(),
-                                                              ind2, hd2, v2, hd1, v1, ctx)? {
+                            match Stack::eta_expand_ind_stack(globals,
+                                                              ind2, hd2, v2, hd1, v1, ctx_, ctx)? {
                                 Some((mut v2, mut v1)) => {
-                                    return self.convert_stacks(univ, enga, &lft1, &lft2,
-                                                               &mut v1, &mut v2, i, s, ctx)
+                                    return self.convert_stacks(infos_, univ, enga, globals,
+                                                               &lft1, &lft2,
+                                                               &mut v1, &mut v2, i, s, ctx, ctx_)
                                 },
                                 None => return Err(Box::new(ConvError::NotConvertible)),
                             }
@@ -843,10 +798,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     },
                     // Loop through again.
                 },
-                (c1, &FTerm::Flex(fl2)) => match self.unfold_reference(fl2, ctx)?
-                                                     .map( |def2| def2.clone() ) {
+                (c1, &FTerm::Flex(fl2)) => match infos_.unfold_reference(globals, fl2, ctx_)?
+                                                       .map( |def2| def2.clone() ) {
                     Some(def2) => {
-                        hd2 = v2.whd_stack(self, def2, ctx, i.clone(), s.clone())?;
+                        hd2 = v2.whd_stack(infos_, globals, def2, ctx_, i.clone(), s.clone())?;
                     },
                     None => match *c1 {
                         FTerm::Construct(o) => {
@@ -854,11 +809,12 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                             // NOTE: We do not catch exactly the same errors that we do in the
                             // OCaml implementation here.  See eta_expand_ind_stack definition for
                             // more information.
-                            match Stack::eta_expand_ind_stack(self.globals(),
-                                                              ind1, hd1, v1, hd2, v2, ctx)? {
+                            match Stack::eta_expand_ind_stack(globals,
+                                                              ind1, hd1, v1, hd2, v2, ctx, ctx_)? {
                                 Some((mut v1, mut v2)) => {
-                                    return self.convert_stacks(univ, enga, &lft1, &lft2,
-                                                               &mut v1, &mut v2, i, s, ctx)
+                                    return self.convert_stacks(infos_, univ, enga, globals,
+                                                               &lft1, &lft2,
+                                                               &mut v1, &mut v2, i, s, ctx, ctx_)
                                 },
                                 None => return Err(Box::new(ConvError::NotConvertible)),
                             }
@@ -871,9 +827,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                 (&FTerm::Ind(o1), &FTerm::Ind(o2)) => {
                     let PUniverses(ref ind1, ref u1) = **o1;
                     let PUniverses(ref ind2, ref u2) = **o2;
-                    return if self.mind_equiv(ind1, ind2) {
+                    return if globals.mind_equiv(ind1, ind2) {
                         univ.convert(u1, u2)?;
-                        self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx)
+                        self.convert_stacks(infos_, univ, enga, globals, &lft1, &lft2,
+                                            v1, v2, i, s, ctx, ctx_)
                     } else {
                         Err(Box::new(ConvError::NotConvertible))
                     }
@@ -881,9 +838,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                 (&FTerm::Construct(o1), &FTerm::Construct(o2)) => {
                     let PUniverses(Cons { ind: ref ind1, idx: j1 }, ref u1) = **o1;
                     let PUniverses(Cons { ind: ref ind2, idx: j2 }, ref u2) = **o2;
-                    return if j1 == j2 && self.mind_equiv(ind1, ind2) {
+                    return if j1 == j2 && globals.mind_equiv(ind1, ind2) {
                         univ.convert(u1, u2)?;
-                        self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx)
+                        self.convert_stacks(infos_, univ, enga, globals, &lft1, &lft2,
+                                            v1, v2, i, s, ctx, ctx_)
                     } else {
                         Err(Box::new(ConvError::NotConvertible))
                     }
@@ -894,11 +852,12 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     // NOTE: We do not catch exactly the same errors that we do in the
                     // OCaml implementation here.  See eta_expand_ind_stack definition for
                     // more information.
-                    match Stack::eta_expand_ind_stack(self.globals(),
-                                                      ind1, hd1, v1, hd2, v2, ctx)? {
+                    match Stack::eta_expand_ind_stack(globals,
+                                                      ind1, hd1, v1, hd2, v2, ctx, ctx_)? {
                         Some((mut v1, mut v2)) => {
-                            return self.convert_stacks(univ, enga, &lft1, &lft2,
-                                                       &mut v1, &mut v2, i, s, ctx)
+                            return self.convert_stacks(infos_, univ, enga, globals,
+                                                       &lft1, &lft2,
+                                                       &mut v1, &mut v2, i, s, ctx, ctx_)
                         },
                         None => return Err(Box::new(ConvError::NotConvertible)),
                     }
@@ -908,11 +867,12 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                     // NOTE: We do not catch exactly the same errors that we do in the
                     // OCaml implementation here.  See eta_expand_ind_stack definition for
                     // more information.
-                    match Stack::eta_expand_ind_stack(self.globals(),
-                                                      ind2, hd2, v2, hd1, v1, ctx)? {
+                    match Stack::eta_expand_ind_stack(globals,
+                                                      ind2, hd2, v2, hd1, v1, ctx_, ctx)? {
                         Some((mut v2, mut v1)) => {
-                            return self.convert_stacks(univ, enga, &lft1, &lft2,
-                                                       &mut v1, &mut v2, i, s, ctx)
+                            return self.convert_stacks(infos_, univ, enga, globals,
+                                                       &lft1, &lft2,
+                                                       &mut v1, &mut v2, i, s, ctx, ctx_)
                         },
                         None => return Err(Box::new(ConvError::NotConvertible)),
                     }
@@ -929,10 +889,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         let n = cl1.len();
                         for (ty1, ty2) in tys1.iter().zip(tys2.iter()) {
                             let fty1 = e1.mk_clos(ty1, ctx)?;
-                            let fty2 = e2.mk_clos(ty2, ctx)?;
+                            let fty2 = e2.mk_clos(ty2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
-                            self.ccnv(univ, enga, ConvPb::Conv, &el1, &el2,
-                                      fty1, fty2, i.clone(), s.clone(), ctx)?;
+                            self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
+                                      fty1, fty2, i.clone(), s.clone(), ctx, ctx_)?;
                         }
                         let mut e1 = e1.clone(); // expensive
                         let mut e2 = e2.clone(); // expensive
@@ -948,12 +908,13 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         }
                         for (c1, c2) in cl1.iter().zip(cl2.iter()) {
                             let fc1 = e1.mk_clos(c1, ctx)?;
-                            let fc2 = e2.mk_clos(c2, ctx)?;
+                            let fc2 = e2.mk_clos(c2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
-                            self.ccnv(univ, enga, ConvPb::Conv, &el1, &el2,
-                                      fc1, fc2, i.clone(), s.clone(), ctx)?;
+                            self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
+                                      fc1, fc2, i.clone(), s.clone(), ctx, ctx_)?;
                         }
-                        return self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx);
+                        return self.convert_stacks(infos_, univ, enga, globals,
+                                                   &lft1, &lft2, v1, v2, i, s, ctx, ctx_);
                     } else {
                         return Err(Box::new(ConvError::NotConvertible))
                     }
@@ -970,10 +931,10 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         let n = cl1.len();
                         for (ty1, ty2) in tys1.iter().zip(tys2.iter()) {
                             let fty1 = e1.mk_clos(ty1, ctx)?;
-                            let fty2 = e2.mk_clos(ty2, ctx)?;
+                            let fty2 = e2.mk_clos(ty2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
-                            self.ccnv(univ, enga, ConvPb::Conv, &el1, &el2,
-                                      fty1, fty2, i.clone(), s.clone(), ctx)?;
+                            self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
+                                      fty1, fty2, i.clone(), s.clone(), ctx, ctx_)?;
                         }
                         let mut e1 = e1.clone(); // expensive
                         let mut e2 = e2.clone(); // expensive
@@ -989,12 +950,13 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
                         }
                         for (c1, c2) in cl1.iter().zip(cl2.iter()) {
                             let fc1 = e1.mk_clos(c1, ctx)?;
-                            let fc2 = e2.mk_clos(c2, ctx)?;
+                            let fc2 = e2.mk_clos(c2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
-                            self.ccnv(univ, enga, ConvPb::Conv, &el1, &el2,
-                                      fc1, fc2, i.clone(), s.clone(), ctx)?;
+                            self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
+                                      fc1, fc2, i.clone(), s.clone(), ctx, ctx_)?;
                         }
-                        return self.convert_stacks(univ, enga, &lft1, &lft2, v1, v2, i, s, ctx);
+                        return self.convert_stacks(infos_, univ, enga, globals,
+                                                   &lft1, &lft2, v1, v2, i, s, ctx, ctx_);
                     } else {
                         return Err(Box::new(ConvError::NotConvertible))
                     }
@@ -1015,10 +977,14 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
     }
 
     /// Note: stk1 and stk2 must be type-checked beforehand!
-    fn convert_stacks<I, S>(&mut self, univ: &Universes, enga: &Engagement,
-                            lft1: &Lift, lft2: &Lift,
-                            stk1: &Stack<'a, 'b, I, S>, stk2: &Stack<'a, 'b, I, S>,
-                            i: I, s: S, ctx: &'a Context<'a, 'b>) -> ConvResult<()>
+    fn convert_stacks<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'c, 'b>,
+                                univ: &Universes, enga: &Engagement,
+                                globals: &'r mut Globals<'g>,
+                                lft1: &Lift, lft2: &Lift,
+                                stk1: &Stack<'a, 'b, I, S>, stk2: &Stack<'c, 'b, I, S>,
+                                i: I, s: S,
+                                ctx: &'a Context<'a, 'b>,
+                                ctx_: &'c Context<'c, 'b>) -> ConvResult<()>
         where
             I: Clone,
             S: Clone,
@@ -1026,12 +992,19 @@ impl<'a, 'b, 'g> Infos<'a, 'b, 'g, FConstr<'a, 'b>> {
         let mut lft1 = lft1.clone(); // expensive, but shouldn't outlive this block.
         let mut lft2 = lft2.clone(); // expensive, but shouldn't outlive this block.
         compare_stacks(
-            &mut |infos: &mut Self, (l1, t1), (l2, t2)|
-                infos.ccnv(univ, enga, ConvPb::Conv, l1, l2, t1, t2, i.clone(), s.clone(), ctx),
-            &mut Self::mind_equiv,
+            &mut |o: &mut (&'r mut Self, &'r mut ClosInfos<'c, 'b>, &'r mut Globals<'g>),
+                  (l1, t1), (l2, t2)| {
+                let (ref mut infos, ref mut infos_, ref mut globals) = *o;
+                infos.ccnv(infos_, univ, enga, globals, ConvPb::Conv, l1, l2, t1, t2,
+                           i.clone(), s.clone(), ctx, ctx_)
+            },
+            &mut |o: &(&'r mut Self, &'r mut ClosInfos<'c, 'b>, &'r mut Globals<'g>), ind1, ind2| {
+                let (_, _, ref globals) = *o;
+                globals.mind_equiv(ind1, ind2)
+            },
             &mut lft1, stk1, &mut lft2, stk2,
-            ctx,
-            self
+            ctx, ctx_,
+            &mut (self, infos_, globals)
         )
     }
 }
@@ -1041,16 +1014,21 @@ impl<'b, 'g> Env<'b, 'g> {
     fn clos_fconv(&mut self, cv_pb: ConvPb, eager_delta: bool,
                       t1: &Constr, t2: &Constr) -> ConvResult<()> {
         let Env { ref mut stratification, ref mut globals, ref mut rel_context } = *self;
+        let ref mut rel_context_ = rel_context.clone();
         let univ = stratification.universes();
         let enga = stratification.engagement();
         let ref ctx = Context::new();
+        let ref ctx_ = Context::new();
         let mut infos =
             Infos::create(if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
-                          globals,
                           rel_context.iter_mut())?;
+        let mut infos_ =
+            Infos::create(if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
+                          rel_context_.iter_mut())?;
         let v1 = t1.inject(ctx)?;
-        let v2 = t2.inject(ctx)?;
-        infos.ccnv(univ, enga, cv_pb, &Lift::id(), &Lift::id(), v1, v2, (), (), ctx)
+        let v2 = t2.inject(ctx_)?;
+        infos.ccnv(&mut infos_, univ, enga, globals,
+                   cv_pb, &Lift::id(), &Lift::id(), v1, v2, (), (), ctx, ctx_)
     }
 
     /// Note: t1 and t2 must be type-checked beforehand!
