@@ -72,7 +72,7 @@ pub enum CMap<K, V> {
 #[derive(Debug,Clone)]
 pub struct Map<K, V>(pub HashMap<K, V>) where K: Hash + Eq;
 
-pub type HSet<V> = Map<Int, Set<V>>;
+pub type HSet<V> = CMap<Int, Set<V>>;
 
 #[derive(Debug, Clone, DeserializeState, Eq, PartialEq)]
 #[serde(deserialize_state = "Seed<'de>")]
@@ -83,7 +83,7 @@ pub enum HList<T> {
     Cons(#[serde(deserialize_state)] ORef<(T, Int, HList<T>)>),
 }
 
-pub type HMap<K, V> = Map<Int, Map<K, V>>;
+pub type HMap<K, V> = CMap<Int, CMap<K, V>>;
 
 /* lib/future */
 
@@ -357,7 +357,7 @@ pub enum DeltaHint {
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct Resolver(#[serde(deserialize_state)] Map<Mp, Mp>, #[serde(deserialize_state)] HMap<Kn, DeltaHint>);
+pub struct Resolver(#[serde(deserialize_state)] CMap<Mp, Mp>, #[serde(deserialize_state)] HMap<Kn, DeltaHint>);
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
@@ -365,7 +365,7 @@ pub struct MpResolver(#[serde(deserialize_state)] Mp, #[serde(deserialize_state)
 
 #[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct Subst(#[serde(deserialize_state)] pub Map<Mp, MpResolver>, #[serde(deserialize_state)] pub Map<UId, MpResolver>);
+pub struct Subst(#[serde(deserialize_state)] pub CMap<Mp, MpResolver>, #[serde(deserialize_state)] pub CMap<UId, MpResolver>);
 
 /* kernel/lazyconstr */
 
