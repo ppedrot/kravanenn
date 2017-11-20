@@ -894,7 +894,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         })?;
                         // Continue the loop only if we added some elements to the head of the
                         // stack (a fixpoint does this).
-                        if let Some(s) = bstk.pop() { s_ = s; continue } else { break } }
+                        if let Some(s) = bstk.pop() { s_ = s; continue } else { break }
                     },
                 };
                 // Now we have to deal with the immutable case.  This is basically identical to the
