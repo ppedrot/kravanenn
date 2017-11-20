@@ -334,55 +334,78 @@ impl Constr {
     /// Reduction functions
 
     /// Note: self must be type-checked beforehand!
-    pub fn whd_betaiotazeta(self) -> RedResult<Constr> {
-        match self {
+    ///
+    /// This function is a bit weird because it actually mutates self in place.  This seems like it
+    /// might not be the desired behavior, but it turns out to be quite convenient (in particular,
+    /// because the lifetime of c exists outside the function call, it's easy to point into it if
+    /// you need to manipulate the result of the whd afterwards and then return something
+    /// pointing into it.  The same applies to the other whd_ functions.
+    ///
+    /// (Worth noting: if there's a panic, *self will be untouched.  But if you're using UnwindSafe
+    /// properly this should not affect you anyway).
+    pub fn whd_betaiotazeta(&mut self) -> RedResult<()> {
+        match *self {
             Constr::Sort(_) | /* Constr::Var(_) | Constr::Meta(_) | Constr::Evar(_) |*/
             Constr::Const(_) | Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) |
-            Constr::Lambda(_) | Constr::Fix(_) | Constr::CoFix(_) => Ok(self),
+            Constr::Lambda(_) | Constr::Fix(_) | Constr::CoFix(_) => Ok(()),
             _ => {
                 let mut globals = Globals::default();
-                let ref ctx = Context::new();
-                let mut infos = Infos::create(Reds::BETAIOTAZETA, &mut globals, iter::empty())?;
-                let v = self.inject(ctx)?;
-                v.whd_val(&mut infos, ctx)
+                *self = {
+                    let ref ctx = Context::new();
+                    let mut infos = Infos::create(Reds::BETAIOTAZETA, &mut globals,
+                                                  iter::empty())?;
+                    let v = self.inject(ctx)?;
+                    v.whd_val(&mut infos, ctx)?
+                };
+                Ok(())
             }
         }
     }
 
     /// Note: self must be type-checked beforehand!
-    pub fn whd_all<'b, 'g>(self, env: &mut Env<'b, 'g>) -> RedResult<Constr>
+    ///
+    /// Mutates self in place; see whd_betaiotazeta for more information.
+    pub fn whd_all<'b, 'g>(&mut self, env: &mut Env<'b, 'g>) -> RedResult<()>
         where 'g: 'b,
     {
-        match self {
+        match *self {
             Constr::Sort(_) | /* Constr::Meta(_) | Constr::Evar(_) |*/
             Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) | Constr::Lambda(_) |
-            Constr::Fix(_) | Constr::CoFix(_) => Ok(self),
+            Constr::Fix(_) | Constr::CoFix(_) => Ok(()),
             _ => {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
-                let ref ctx = Context::new();
-                let mut infos = Infos::create(Reds::BETADELTAIOTA, globals,
-                                              rel_context.iter_mut())?;
-                let v = self.inject(ctx)?;
-                v.whd_val(&mut infos, ctx)
+                *self = {
+                    let ref ctx = Context::new();
+                    let mut infos = Infos::create(Reds::BETADELTAIOTA, globals,
+                                                  rel_context.iter_mut())?;
+                    let v = self.inject(ctx)?;
+                    v.whd_val(&mut infos, ctx)?
+                };
+                Ok(())
             }
         }
     }
 
     /// Note: self must be type-checked beforehand!
-    pub fn whd_allnolet<'b, 'g>(self, env: &mut Env<'b, 'g>) -> RedResult<Constr>
+    ///
+    /// Mutates self in place; see whd_betaiotazeta for more information.
+    pub fn whd_allnolet<'b, 'g>(&mut self, env: &mut Env<'b, 'g>) -> RedResult<()>
         where 'g: 'b,
     {
-        match self {
+        match *self {
             Constr::Sort(_) | /* Constr::Meta(_) | Constr::Evar(_) |*/
             Constr::Ind(_) | Constr::Construct(_) | Constr::Prod(_) | Constr::Lambda(_) |
-            Constr::Fix(_) | Constr::CoFix(_) | Constr::LetIn(_) => Ok(self),
+            Constr::Fix(_) | Constr::CoFix(_) | Constr::LetIn(_) => Ok(()),
             _ => {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
-                let ref ctx = Context::new();
-                let mut infos = Infos::create(Reds::BETADELTAIOTANOLET, globals,
-                                              rel_context.iter_mut())?;
-                let v = self.inject(ctx)?;
-                v.whd_val(&mut infos, ctx)
+                *self = {
+                    let ref ctx = Context::new();
+                    let mut infos = Infos::create(Reds::BETADELTAIOTANOLET, globals,
+                                                  rel_context.iter_mut())?;
+                    let v = self.inject(ctx)?;
+                    v.whd_val(&mut infos, ctx)?
+                };
+                Ok(())
             }
         }
     }
@@ -1064,8 +1087,11 @@ impl<'b, 'g> Env<'b, 'g> {
     ///
     /// if this does not work, then we use the string S as part of our
     /// error message.
-    fn hnf_prod_app(&mut self, t: Constr, n: &Constr) -> ConvResult<Constr> {
-        match t.whd_all(self)? {
+    ///
+    /// NOTE: t must be typechecked beforehand!
+    fn hnf_prod_app(&mut self, mut t: Constr, n: &Constr) -> ConvResult<Constr> {
+        t.whd_all(self)?;
+        match t {
             Constr::Prod(o) => {
                 let (_, _, ref b) = *o;
                 Ok(b.subst1(n)?)
@@ -1075,6 +1101,8 @@ impl<'b, 'g> Env<'b, 'g> {
     }
 
     /// Pseudo-reduction rule  Prod(x,A,B) a --> B[x\a]
+    ///
+    /// NOTE: t must be typechecked beforehand!
     pub fn hnf_prod_applist(&mut self, mut t: Constr, nl: &[Constr]) -> ConvResult<Constr> {
         for n in nl.iter().rev() {
             t = self.hnf_prod_app(t, n)?;
@@ -1086,12 +1114,12 @@ impl<'b, 'g> Env<'b, 'g> {
     ///
     /// Recognizing products and arities modulo reduction
 
-    /// Note: t1 and t2 must be type-checked beforehand!
+    /// NOTE: t1 and t2 must be type-checked beforehand!
     pub fn dest_prod(&mut self, mut c: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
         let mut m = Vec::new();
         loop {
-            let t = c.whd_all(self)?;
-            match t {
+            c.whd_all(self)?;
+            match c {
                 Constr::Prod(o) => {
                     let (ref n, ref a, ref c0) = *o;
                     let d = RDecl::LocalAssum(n.clone(), a.clone());
@@ -1099,7 +1127,7 @@ impl<'b, 'g> Env<'b, 'g> {
                     m.push(d);
                     c = c0.clone();
                 },
-                _ => { return Ok((m, t)) }
+                _ => { return Ok((m, c)) }
             }
         }
     }
@@ -1110,8 +1138,8 @@ impl<'b, 'g> Env<'b, 'g> {
     pub fn dest_prod_assum(&mut self, mut ty: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
         let mut l = Vec::new();
         loop {
-            let rty = ty.whd_allnolet(self)?;
-            match rty {
+            ty.whd_allnolet(self)?;
+            match ty {
                 Constr::Prod(o) => {
                     let (ref x, ref t, ref c) = *o;
                     let d = RDecl::LocalAssum(x.clone(), t.clone());
@@ -1131,9 +1159,10 @@ impl<'b, 'g> Env<'b, 'g> {
                     ty = c.clone();
                 },
                 _ => {
-                    let rty_ = rty.clone().whd_all(self)?;
-                    if rty_.eq(&rty) { return Ok((l, rty)) }
-                    else { ty = rty_; }
+                    let mut ty_ = ty.clone();
+                    ty_.whd_all(self)?;
+                    if ty_.eq(&ty) { return Ok((l, ty)) }
+                    else { ty = ty_; }
                 },
             }
         }
@@ -1143,8 +1172,8 @@ impl<'b, 'g> Env<'b, 'g> {
     pub fn dest_lam_assum(&mut self, mut ty: Constr) -> ConvResult<(Vec<RDecl>, Constr)> {
         let mut l = Vec::new();
         loop {
-            let rty = ty.whd_allnolet(self)?;
-            match rty {
+            ty.whd_allnolet(self)?;
+            match ty {
                 Constr::Lambda(o) => {
                     let (ref x, ref t, ref c) = *o;
                     let d = RDecl::LocalAssum(x.clone(), t.clone());
@@ -1163,7 +1192,7 @@ impl<'b, 'g> Env<'b, 'g> {
                     let (ref c, _, _) = *o;
                     ty = c.clone();
                 },
-                _ => { return Ok((l, rty)) },
+                _ => { return Ok((l, ty)) },
             }
         }
     }

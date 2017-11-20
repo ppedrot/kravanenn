@@ -101,10 +101,15 @@ impl Constr {
     }
 
     /// This method has arguments in the same order as the OCaml.
-    pub fn decompose_app<'a>(&'a self, cl: &'a [Self]) -> (&Self, Vec<&Self>) {
-        let (f, mut cl) = self.collapse_appl(cl);
-        cl.reverse();
-        (f, cl)
+    pub fn decompose_app(&self) -> (&Self, Vec<&Self>) {
+        if let Constr::App(ref o) = *self {
+            let (ref f, ref cl) = **o;
+            let (f, mut cl) = f.collapse_appl(cl);
+            cl.reverse();
+            (f, cl)
+        } else {
+            (self, Vec::new())
+        }
     }
 
     pub fn applist(self, l: Vec<Constr>) -> Constr {
