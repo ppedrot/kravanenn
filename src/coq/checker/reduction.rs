@@ -339,7 +339,7 @@ impl Constr {
     /// might not be the desired behavior, but it turns out to be quite convenient (in particular,
     /// because the lifetime of c exists outside the function call, it's easy to point into it if
     /// you need to manipulate the result of the whd afterwards and then return something
-    /// pointing into it.  The same applies to the other whd_ functions.
+    /// pointing into it).  The same applies to the other whd_ functions.
     ///
     /// (Worth noting: if there's a panic, *self will be untouched.  But if you're using UnwindSafe
     /// properly this should not affect you anyway).

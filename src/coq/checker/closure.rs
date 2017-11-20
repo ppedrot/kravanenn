@@ -212,6 +212,13 @@ pub enum StackMember<'a, 'b, Inst, Shft> where 'b: 'a {
     Update(&'a FConstr<'a, 'b>, Inst),
 }
 
+/// A dumbed-down version of Cow that has no requirements on its type parameter.
+/// Used for implementig the immutable version of zip.
+enum SCow<'a, B> where B: 'a {
+    Borrowed(&'a B),
+    Owned(B),
+}
+
 /// A [stack] is a context of arguments, arguments are pushed by
 /// [append_stack] one array at a time but popped with [decomp_stack]
 /// one by one
@@ -275,6 +282,18 @@ impl<'b, T> ::std::ops::Deref for KeyTable<'b, T> {
 impl<'b, T> ::std::ops::DerefMut for KeyTable<'b, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+impl<'a, B> Deref for SCow<'a, B>
+{
+    type Target = B;
+
+    fn deref(&self) -> &B {
+        match *self {
+            SCow::Borrowed(borrowed) => borrowed,
+            SCow::Owned(ref owned) => owned,
+        }
     }
 }
 
@@ -723,73 +742,230 @@ impl<'a, 'b> FConstr<'a, 'b> {
         }
     }
 
-    fn zip<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
-           ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
+    /// Zip a single item; shared between zip and zip_mut.
+    ///
+    /// f is the function used to perform the append in the App case.
+    fn zip_item_mut<'r, I, S, F>(m: Cow<'r, Self>, s: StackMember<'a, 'b, I, S>,
+                                 ctx: &'a Context<'a, 'b>,
+                                 f: F) -> IdxResult<Cow<'r, Self>>
+        where F: FnOnce(Vec<Self>, Stack<'a, 'b, I, S>),
+    {
+        match s {
+            StackMember::App(args) => {
+                let norm = m.norm.get().neutr();
+                let t = FTerm::App(m.into_owned(), args);
+                Ok(Cow::Owned(FConstr {
+                    norm: Cell::new(norm),
+                    term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                }))
+            },
+            StackMember::Case(o, p, br, _) => {
+                let norm = m.norm.get().neutr();
+                let t = FTerm::Case(o, p, m.into_owned(), br);
+                Ok(Cow::Owned(FConstr {
+                    norm: Cell::new(norm),
+                    term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                }))
+            },
+            StackMember::CaseT(o, e, _) => {
+                let norm = m.norm.get().neutr();
+                let t = FTerm::CaseT(o, m.into_owned(), e);
+                Ok(Cow::Owned(FConstr {
+                    norm: Cell::new(norm),
+                    term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                }))
+            },
+            StackMember::Proj(_, _, p, b, _) => {
+                let norm = m.norm.get().neutr();
+                let t = FTerm::Proj(p, b, m.into_owned());
+                Ok(Cow::Owned(FConstr {
+                    norm: Cell::new(norm),
+                    term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                }))
+            },
+            StackMember::Fix(fx, par, _) => {
+                // FIXME: This seems like a very weird and convoluted way to do this.
+                let mut v = vec![m.into_owned()];
+                f(v, par);
+                Ok(Cow::Owned(fx))
+            },
+            StackMember::Shift(n, _) => {
+                Ok(Cow::Owned(m.lft(n, ctx)?))
+            },
+            StackMember::Update(rf, _) => {
+                rf.update(m.norm.get(), m.term.get());
+                // TODO: The below is closer to the OCaml implementation, but it doesn't seem
+                // like there's any point in doing it, since we never update m anyway (we do
+                // return it at the end, but we're currently returning an owned FTerm rather
+                // than a shared reference).
+                // *m = Cow::Borrowed(rf);
+                Ok(m)
+            },
+        }
+    }
+
+    /// This differs from the OCaml because it acutally mutates its stk argument.  Fortunately,
+    /// this only matters in one place (whd_stack)--see below.
+    fn zip_mut<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
+                     ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
         let mut m = Cow::Borrowed(self);
         while let Some(s) = stk.pop() {
-            match s {
-                StackMember::App(args) => {
-                    let norm = m.norm.get().neutr();
-                    let t = FTerm::App(m.into_owned(), args);
-                    m = Cow::Owned(FConstr {
-                        norm: Cell::new(norm),
-                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
-                    });
-                },
-                StackMember::Case(o, p, br, _) => {
-                    let norm = m.norm.get().neutr();
-                    let t = FTerm::Case(o, p, m.into_owned(), br);
-                    m = Cow::Owned(FConstr {
-                        norm: Cell::new(norm),
-                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
-                    });
-                },
-                StackMember::CaseT(o, e, _) => {
-                    let norm = m.norm.get().neutr();
-                    let t = FTerm::CaseT(o, m.into_owned(), e);
-                    m = Cow::Owned(FConstr {
-                        norm: Cell::new(norm),
-                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
-                    });
-                },
-                StackMember::Proj(_, _, p, b, _) => {
-                    let norm = m.norm.get().neutr();
-                    let t = FTerm::Proj(p, b, m.into_owned());
-                    m = Cow::Owned(FConstr {
-                        norm: Cell::new(norm),
-                        term: Cell::new(Some(ctx.term_arena.alloc(t))),
-                    });
-                },
-                StackMember::Fix(fx, mut par, _) => {
-                    // FIXME: This seems like a very weird and convoluted way to do this.
-                    let mut v = vec![m.into_owned()];
-                    m = Cow::Owned(fx);
-                    stk.append(v);
-                    // mem::swap(stk, &mut par);
-                    // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
-                    // actually at the end of the Vec.  Therefore, where in the OCaml we perform
-                    // par @ stk, here we have reversed par and reversed stk, and perform
-                    // stk ++ par (or kst ++ rap).
-                    stk.extend(par.0.into_iter());
-                },
-                StackMember::Shift(n, _) => {
-                    m = Cow::Owned(m.lft(n, ctx)?);
-                },
-                StackMember::Update(rf, _) => {
-                    rf.update(m.norm.get(), m.term.get());
-                    // TODO: The below is closer to the OCaml implementation, but it doesn't seem
-                    // like there's any point in doing it, since we never update m anyway (we do
-                    // return it at the end, but we're currently returning an owned FTerm rather
-                    // than a shared reference).
-                    // m = Cow::Borrowed(rf);
-                },
-            }
+            m = Self::zip_item_mut(m, s, ctx, |v, par| {
+                stk.append(v);
+                // mem::swap(stk, &mut par);
+                // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
+                // actually at the end of the Vec.  Therefore, where in the OCaml we perform
+                // par @ stk, here we have reversed par and reversed stk, and perform
+                // stk ++ par (or kst ++ rap).
+                stk.extend(par.0.into_iter());
+            })?;
         }
         Ok(m.into_owned())
     }
 
-    fn fapp_stack<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
-                        ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
+    /// This differs from the OCaml because it actually mutates its stk argument.  Fortunately, in
+    /// all but one place, this doesn't matter, because we end up not using the stack afterwards
+    /// anyway.  The one place, sadly, is whd_stack, which is called all the time, so optimizing
+    /// that case separately might be a good idea.
+    fn fapp_stack_mut<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
+                            ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
+        self.zip_mut(stk, ctx)
+    }
+
+    /// The immutable version of zip.  Doesn't return a value, since it's only used by whd_stack to
+    /// apply update marks.
+    fn zip<'r, I, S>(&self, stk: &'r Stack<'a, 'b, I, S>,
+                     ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
+        let stk = stk.iter();
+        let mut bstk: Vec<SCow<StackMember<_, _>>> = Vec::new(); // the stack, m, and s outlive bstk
+        let mut m = Cow::Borrowed(self); // the stack and s outlive m
+        // We use a Vec of SCows of StackMembers rather than a normal stack.  The reason is that
+        // normal stacks own their items, and some operations (like append) require mutability
+        // in order to function.  Rather than write a specialized version of Stack that works
+        // within these restrictions, we just use the Vec directly and inline specialized versions
+        // of the methods we need (currently, just append).
+        //
+        // So what's the upside to this over cloning the stack up front?  Well, we avoid tracing
+        // the stack again, and not being allowed to clone stacks normally is a nice lint, but
+        // that honestly might be less work; maybe we should just do that instead.
+        //
+        // Also note that we use SCow over regular Cow because regular Cow requires there to be an
+        // easy way to turn an immutable version into an owned one, which we don't actually have in
+        // general (we only sort of provide an implementation for Apps).
+        for s_ in stk {
+            let mut s_ = SCow::Borrowed(s_);
+            loop {
+                // Manual copy of append designed for our weird Cow stacks.
+                let append = |bstk: &mut Vec<_>, v: Vec<_>| {
+                    if let Some(o) = bstk.last_mut() {
+                        match *o {
+                            SCow::Borrowed(&StackMember::App(ref l)) => {
+                                v.extend(l.iter().map( |v| v.clone() ));
+                                *o = SCow::Owned(StackMember::App(v));
+                                return;
+                            },
+                            SCow::Owned(StackMember::App(ref mut l)) => {
+                                mem::swap(&mut v, l);
+                                l.extend(v.into_iter());
+                                return;
+                            },
+                            _ => {},
+                        }
+                    }
+                    bstk.push(SCow::Owned(StackMember::App(v)))
+                };
+                // First, check whether we can get away (almost) with the mutable case.
+                let s = match s_ {
+                    SCow::Borrowed(s) => s,
+                    SCow::Owned(s) => {
+                        // In the owned case, we can just treat this like we do for regular mutable
+                        // stacks, except for the append case (which needs to be different to deal
+                        // with our weird Cow stack).  Actually, the append case is the only case
+                        // we should ever see here, but it might be annoying to convince Rust's
+                        // type system of that, and anyway it wouldn't save us much code.
+                        m = Self::zip_item_mut(m, s, ctx, |mut v, par| {
+                            append(&mut bstk, v);
+                            // mem::swap(stk, &mut par);
+                            // NOTE: Since we use a Vec rather than a list, the "head" of our
+                            // stack is actually at the end of the Vec.  Therefore, where in the
+                            // OCaml we perform par @ stk, here we have reversed par and reversed
+                            // stk, and perform stk ++ par (or kst ++ rap).
+                            bstk.extend(par.0.into_iter().map(SCow::Owned));
+                        })?;
+                        // Continue the loop only if we added some elements to the head of the
+                        // stack (a fixpoint does this).
+                        if let Some(s) = bstk.pop() { s_ = s; continue } else { break } }
+                    },
+                };
+                // Now we have to deal with the immutable case.  This is basically identical to the
+                // mutable case, except that we clone instead of moving.
+                match *s {
+                    StackMember::App(ref args) => {
+                        let norm = m.norm.get().neutr();
+                        let t = FTerm::App(m.into_owned(), args.clone() /* expensive */);
+                        m = Cow::Owned(FConstr {
+                            norm: Cell::new(norm),
+                            term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                        });
+                    },
+                    StackMember::Case(o, ref p, ref br, _) => {
+                        let norm = m.norm.get().neutr();
+                        let t = FTerm::Case(o, p.clone(), m.into_owned(),
+                                            br.clone() /* expensive */);
+                        m = Cow::Owned(FConstr {
+                            norm: Cell::new(norm),
+                            term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                        });
+                    },
+                    StackMember::CaseT(o, ref e, _) => {
+                        let norm = m.norm.get().neutr();
+                        let t = FTerm::CaseT(o, m.into_owned(), e.clone() /* expensive */);
+                        m = Cow::Owned(FConstr {
+                            norm: Cell::new(norm),
+                            term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                        });
+                    },
+                    StackMember::Proj(_, _, p, ref b, _) => {
+                        let norm = m.norm.get().neutr();
+                        let t = FTerm::Proj(p, b.clone(), m.into_owned());
+                        m = Cow::Owned(FConstr {
+                            norm: Cell::new(norm),
+                            term: Cell::new(Some(ctx.term_arena.alloc(t))),
+                        });
+                    },
+                    StackMember::Fix(ref fx, ref par, _) => {
+                        // FIXME: This seems like a very weird and convoluted way to do this.
+                        let mut v = vec![m.into_owned()];
+                        m = Cow::Borrowed(fx);
+                        append(&mut bstk, v);
+                        // mem::swap(stk, &mut par);
+                        // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
+                        // actually at the end of the Vec.  Therefore, where in the OCaml we
+                        // perform par @ stk, here we have reversed par and reversed stk, and
+                        // perform stk ++ par (or kst ++ rap).
+                        bstk.extend(par.0.iter().map(SCow::Borrowed));
+                    },
+                    StackMember::Shift(n, _) => {
+                        m = Cow::Owned(m.lft(n, ctx)?);
+                    },
+                    StackMember::Update(ref rf, _) => {
+                        rf.update(m.norm.get(), m.term.get());
+                        // TODO: The below is closer to the OCaml implementation, but it doesn't
+                        // seem like there's any point in doing it, since we never update m anyway.
+                        // m = Cow::Borrowed(rf);
+                    },
+                }
+                // Continue the loop only if we added some elements to the head of the stack (a
+                // fixpoint does this).
+                s_ = { if let Some(s) = bstk.pop() { s } else { break } };
+            }
+        }
+        Ok(())
+    }
+
+    /// The immutable version of fapp_stack.
+    fn fapp_stack<I, S>(&self, stk: &Stack<'a, 'b, I, S>,
+                            ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
         self.zip(stk, ctx)
     }
 
@@ -1490,7 +1666,13 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
 
     /// Must be called on a type-checked term.
     ///
-    /// There is some subtlety around the handling of Not_found compared to the OCaml
+    /// NOTE: This is different from the OCaml version in two ways.
+    ///
+    /// The first is that it mutates the stacks that are passed in.  In the cases where
+    /// eta_expand_ind_stack is actually used, this is fine, because we never need to touch them
+    /// again (we use the stacks returned from the function instead).
+    ///
+    /// Secondly, there is some subtlety around the handling of Not_found compared to the OCaml
     /// implementation.  In Ocaml, try_drop_parameters can throw a Not_found, which may propagate
     /// through eta_expand_ind_stack, and so can lookup_mind.  Additionally, eta_expand_ind_stack
     /// throws Not_found explicitly if it turns out that the referenced ind isn't a primitive
@@ -1530,7 +1712,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 // arg1..argn ~= (proj1 t...projn t) where t = zip (f,s')
                 // TODO: Verify that this is checked at some point during typechecking.
                 let pars = usize::try_from(mib.nparams).map_err(IdxError::from)?;
-                let right = f.fapp_stack(s_, ctx)?;
+                let right = f.fapp_stack_mut(s_, ctx)?;
                 let (depth, mut args) = s.strip_update_shift_app(m, ctx)?;
                 // Try to drop the params, might fail on partially applied constructors.
                 if let None = args.try_drop_parameters(depth, pars, ctx)? {
@@ -1855,7 +2037,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             m = self.knht(info, &env, &br[c - 1], ctx, i, s.clone())?;
                         },
                         StackMember::Fix(fx, par, i) => {
-                            let rarg = m.fapp_stack(&mut args, ctx)?;
+                            let rarg = m.fapp_stack_mut(&mut args, ctx)?;
                             // makes a Vec, but not that expensive.
                             self.append(vec![rarg]);
                             self.extend(par.0.into_iter());
@@ -1930,7 +2112,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         where S: Clone, I: Clone,
     {
         Ok(self.kni(info, v, ctx, i, s)?
-               .fapp_stack(self, ctx)?)
+               .fapp_stack_mut(self, ctx)?)
     }
 
 
@@ -1942,6 +2124,13 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         where S: Clone, I: Clone,
     {
         let k = self.kni(info, v, ctx, i, s)?;
+        // expensive -- we avoid a bit of the work by not cloning the stack, but in general we need
+        // to clone all of its contents when we zip up the remaining terms, if there are any
+        // updates.
+        // TODO: See if this can be optimized further--e.g. maybe we can avoid zipping if we know
+        // we don't have any updates?
+        // TODO: Maybe there's a clever way FTerms can "point into the stack" which would allow us
+        // to avoid this step entirely...
         k.fapp_stack(self, ctx)?; // to unlock Zupdates!
         Ok(k)
     }
