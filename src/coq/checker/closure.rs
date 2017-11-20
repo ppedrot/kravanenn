@@ -834,10 +834,10 @@ impl<'a, 'b> FConstr<'a, 'b> {
 
     /// The immutable version of zip.  Doesn't return a value, since it's only used by whd_stack to
     /// apply update marks.
-    fn zip<'r, I, S>(&self, stk: &'r Stack<'a, 'b, I, S>,
-                     ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
+    fn zip<I, S>(&self, stk: &Stack<'a, 'b, I, S>,
+                 ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
         let stk = stk.iter();
-        let mut bstk: Vec<SCow<StackMember<_, _>>> = Vec::new(); // the stack, m, and s outlive bstk
+        let mut bstk = Vec::new(); // the stack, m, and s outlive bstk
         let mut m = Cow::Borrowed(self); // the stack and s outlive m
         // We use a Vec of SCows of StackMembers rather than a normal stack.  The reason is that
         // normal stacks own their items, and some operations (like append) require mutability
@@ -856,7 +856,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
             let mut s_ = SCow::Borrowed(s_);
             loop {
                 // Manual copy of append designed for our weird Cow stacks.
-                let append = |bstk: &mut Vec<_>, v: Vec<_>| {
+                let append = |bstk: &mut Vec<_>, mut v: Vec<_>| {
                     if let Some(o) = bstk.last_mut() {
                         match *o {
                             SCow::Borrowed(&StackMember::App(ref l)) => {
@@ -883,7 +883,7 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         // with our weird Cow stack).  Actually, the append case is the only case
                         // we should ever see here, but it might be annoying to convince Rust's
                         // type system of that, and anyway it wouldn't save us much code.
-                        m = Self::zip_item_mut(m, s, ctx, |mut v, par| {
+                        m = Self::zip_item_mut(m, s, ctx, |v, par| {
                             append(&mut bstk, v);
                             // mem::swap(stk, &mut par);
                             // NOTE: Since we use a Vec rather than a list, the "head" of our
