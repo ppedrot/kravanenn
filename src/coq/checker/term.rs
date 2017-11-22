@@ -9,6 +9,7 @@ use ocaml::values::{
     Fix,
     Fix2,
     Ind,
+    Instance,
     Name,
     PRec,
     PUniverses,
@@ -16,9 +17,10 @@ use ocaml::values::{
     Sort,
     SortContents,
 };
+use std::borrow::{Cow};
 use std::cell::Cell;
 use std::option::{NoneError};
-use std::rc::Rc;
+use std::sync::{Arc};
 
 #[derive(Clone,Copy)]
 pub enum Info {
@@ -113,7 +115,7 @@ impl Constr {
     }
 
     pub fn applist(self, l: Vec<Constr>) -> Constr {
-        Constr::App(ORef(Rc::from((self, Array(Rc::from(l))))))
+        Constr::App(ORef(Arc::from((self, Array(Arc::from(l))))))
     }
 
     /// Functions for dealing with Constr terms
@@ -248,7 +250,7 @@ impl Constr {
                 let (ref c, k, ref t) = **o;
                 let c = f(c, l)?;
                 let t = f(t, l)?;
-                Constr::Cast(ORef(Rc::from((c, k, t))))
+                Constr::Cast(ORef(Arc::from((c, k, t))))
             },
             Constr::Prod(ref o) => {
                 let (ref na, ref t, ref c) = **o;
@@ -256,7 +258,7 @@ impl Constr {
                 let mut l = l.clone(); // expensive
                 g(&mut l)?;
                 let c = f(c, &l)?;
-                Constr::Prod(ORef(Rc::from((na.clone(), t, c))))
+                Constr::Prod(ORef(Arc::from((na.clone(), t, c))))
             },
             Constr::Lambda(ref o) => {
                 let (ref na, ref t, ref c) = **o;
@@ -264,7 +266,7 @@ impl Constr {
                 let mut l = l.clone(); // expensive
                 g(&mut l)?;
                 let c = f(c, &l)?;
-                Constr::Lambda(ORef(Rc::from((na.clone(), t, c))))
+                Constr::Lambda(ORef(Arc::from((na.clone(), t, c))))
             },
             Constr::LetIn(ref o) => {
                 let (ref na, ref b, ref t, ref c) = **o;
@@ -273,14 +275,14 @@ impl Constr {
                 let mut l = l.clone(); // expensive
                 g(&mut l)?;
                 let c = f(c, &l)?;
-                Constr::LetIn(ORef(Rc::from((na.clone(), b, t, c))))
+                Constr::LetIn(ORef(Arc::from((na.clone(), b, t, c))))
             },
             Constr::App(ref o) => {
                 let (ref c, ref al) = **o;
                 let c = f(c, l)?;
                 // expensive -- allocates a Vec
                 let al: Result<Vec<_>, _> = al.iter().map( |x| f(x, l) ).collect();
-                Constr::App(ORef(Rc::from((c, Array(Rc::from(al?))))))
+                Constr::App(ORef(Arc::from((c, Array(Arc::from(al?))))))
             },
             // | Evar (e,al) -> Evar (e, Array.map (f l) al)
             Constr::Case(ref o) => {
@@ -289,7 +291,7 @@ impl Constr {
                 let c = f(c, l)?;
                 // expensive -- allocates a Vec
                 let bl: Result<Vec<_>, _> = bl.iter().map( |x| f(x, l) ).collect();
-                Constr::Case(ORef(Rc::from((ci.clone(), p, c, Array(Rc::from(bl?))))))
+                Constr::Case(ORef(Arc::from((ci.clone(), p, c, Array(Arc::from(bl?))))))
             },
             Constr::Fix(ref o) => {
                 let Fix(ref ln, PRec(ref lna, ref tl, ref bl)) = **o;
@@ -302,10 +304,10 @@ impl Constr {
                 }
                 // expensive -- allocates a Vec
                 let bl: Result<Vec<_>, _> = bl.iter().map( |x| f(x, &l) ).collect();
-                Constr::Fix(ORef(Rc::from(Fix(ln.clone(),
+                Constr::Fix(ORef(Arc::from(Fix(ln.clone(),
                                               PRec(lna.clone(),
-                                                   Array(Rc::from(tl?)),
-                                                   Array(Rc::from(bl?)))))))
+                                                   Array(Arc::from(tl?)),
+                                                   Array(Arc::from(bl?)))))))
             },
             Constr::CoFix(ref o) => {
                 let CoFix(ln, PRec(ref lna, ref tl, ref bl)) = **o;
@@ -318,15 +320,15 @@ impl Constr {
                 }
                 // expensive -- allocates a Vec
                 let bl: Result<Vec<_>, _> = bl.iter().map( |x| f(x, &l) ).collect();
-                Constr::CoFix(ORef(Rc::from(CoFix(ln.clone(),
+                Constr::CoFix(ORef(Arc::from(CoFix(ln.clone(),
                                                   PRec(lna.clone(),
-                                                       Array(Rc::from(tl?)),
-                                                       Array(Rc::from(bl?)))))))
+                                                       Array(Arc::from(tl?)),
+                                                       Array(Arc::from(bl?)))))))
             },
             Constr::Proj(ref o) => {
                 let (ref p, ref c) = **o;
                 let c = f(c, l)?;
-                Constr::Proj(ORef(Rc::from((p.clone(), c))))
+                Constr::Proj(ORef(Arc::from((p.clone(), c))))
             },
             // Constr::Meta(_) | Constr::Var(_) | Constr::Evar(_) => unreachable!("")
         })
@@ -574,6 +576,19 @@ impl Constr {
     pub fn eq(&self, n: &Self) -> bool {
         self as *const _ == n as *const _ ||
         self.compare(n, Self::eq)
+    }
+
+    /// Universe substitutions
+
+    fn map_constr<F, E>(&self, f: F) -> Result<Constr, E>
+        where F: Fn(&Constr) -> Result<Constr, E>,
+    {
+        self.map_constr_with_binders( |_| Ok(()), |c, _| f(c), &())
+    }
+
+    pub fn subst_instance(&self, _subst: &Instance) -> Cow<Constr>
+    {
+        panic!("Universe substituition is not yet implemented.")
     }
 }
 

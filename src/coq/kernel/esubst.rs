@@ -146,6 +146,20 @@ pub enum Expr<T> {
 // trigger GC and don't allocate too frequently for vectors, and
 // don't do much pointer chasing either).
 impl<I> Subs<I> {
+    pub fn dup<F>(&self, f: F) -> Self
+        where F: Fn(&I) -> I
+    {
+        Subs {
+            ops: self.ops.iter().map( |op| {
+                match *op {
+                    Op::Cons(ref i) => Op::Cons(f(i)),
+                    Op::Shift(i) => Op::Shift(i),
+                    Op::Lift(i) => Op::Lift(i),
+                } }).collect(),
+            id: self.id,
+        }
+    }
+
     pub fn id(idx: Option<Idx>) -> Self {
         Subs { ops: SVec::new(), id: match idx { Some(Idx(i)) => i, None => 0 } }
     }

@@ -1,4 +1,5 @@
 use coq::checker::closure::{
+    self,
     ClosInfos,
     Context,
     FConstr,
@@ -58,18 +59,20 @@ use ocaml::values::{
 use std::borrow::{Cow};
 use std::iter;
 use std::mem;
-use std::rc::{Rc};
+use std::sync::{Arc};
+use typed_arena::{Arena};
+use util::ghost_cell::{Set};
 
 /// lft_constr_stack_elt
-enum ZL<'a, 'b> where 'b: 'a {
-    App(Vec<(Lift, FConstr<'a, 'b>)>),
+enum ZL<'id, 'a, 'b> where 'b: 'a, 'id: 'a {
+    App(Vec<(Lift, FConstr<'id, 'a, 'b>)>),
     Proj(&'b Cst, bool, Lift),
-    Fix(Lift, FConstr<'a, 'b>, LftConstrStack<'a, 'b>),
+    Fix(Lift, FConstr<'id, 'a, 'b>, LftConstrStack<'id, 'a, 'b>),
     Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Lift,
-         FConstr<'a, 'b>, Vec<FConstr<'a, 'b>>),
+         FConstr<'id, 'a, 'b>, Vec<FConstr<'id, 'a, 'b>>),
 }
 
-struct LftConstrStack<'a, 'b>(Vec<ZL<'a, 'b>>) where 'b: 'a;
+struct LftConstrStack<'id, 'a, 'b>(Vec<ZL<'id, 'a, 'b>>) where 'b: 'a, 'id: 'a;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConvError {
@@ -92,15 +95,15 @@ pub enum ConvPb {
   Cumul,
 }
 
-impl<'a, 'b> ::std::ops::Deref for LftConstrStack<'a, 'b> {
-    type Target = Vec<ZL<'a, 'b>>;
-    fn deref(&self) -> &Vec<ZL<'a, 'b>> {
+impl<'id, 'a, 'b> ::std::ops::Deref for LftConstrStack<'id, 'a, 'b> {
+    type Target = Vec<ZL<'id, 'a, 'b>>;
+    fn deref(&self) -> &Vec<ZL<'id, 'a, 'b>> {
         &self.0
     }
 }
 
-impl<'a, 'b> ::std::ops::DerefMut for LftConstrStack<'a, 'b> {
-    fn deref_mut(&mut self) -> &mut Vec<ZL<'a, 'b>> {
+impl<'id, 'a, 'b> ::std::ops::DerefMut for LftConstrStack<'id, 'a, 'b> {
+    fn deref_mut(&mut self) -> &mut Vec<ZL<'id, 'a, 'b>> {
         &mut self.0
     }
 }
@@ -129,8 +132,8 @@ impl ::std::convert::From<Box<RedError>> for Box<ConvError> {
     }
 }
 
-impl<'a, 'b> LftConstrStack<'a, 'b> {
-    fn append(&mut self, mut v: Vec<(Lift, FConstr<'a, 'b>)>) {
+impl<'id, 'a, 'b> LftConstrStack<'id, 'a, 'b> {
+    fn append(&mut self, mut v: Vec<(Lift, FConstr<'id, 'a, 'b>)>) {
         // TODO: Work out why we don't do this here?
         // if v.len() == 0 { return }
         if let Some(&mut ZL::App(ref mut l)) = self.last_mut() {
@@ -142,7 +145,7 @@ impl<'a, 'b> LftConstrStack<'a, 'b> {
     }
 }
 
-impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
+impl<'id, 'a, 'b, Inst, Shft> Stack<'id, 'a, 'b, Inst, Shft> {
     fn is_empty(&self) -> bool {
         self.iter().all( |x| match *x {
             StackMember::Update(_, _) => true,
@@ -167,7 +170,7 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
         } else { Ok(()) }
     }
 
-    fn compare_shape<'c>(&self, stk: &Stack<'c, 'b, Inst, Shft>) -> IdxResult<bool> {
+    fn compare_shape<'id_, 'c>(&self, stk: &Stack<'id_, 'c, 'b, Inst, Shft>) -> IdxResult<bool> {
         let mut bal = 0isize;
         let mut stk1 = self.iter();
         let mut stk2 = stk.iter();
@@ -219,8 +222,8 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
     }
 
     /// pure_stack
-    fn to_pure(&self, l: &mut Lift,
-               ctx: &'a Context<'a, 'b>) -> IdxResult<LftConstrStack<'a, 'b>> {
+    fn to_pure(&self, set: &Set<'id>, l: &mut Lift,
+               ctx: Context<'id, 'a, 'b>) -> IdxResult<LftConstrStack<'id, 'a, 'b>> {
         // NB: This function seemed *very* susceptible to stack overflow, so it's been changed
         // significantly from its OCaml implementation to be more amenable to loops (the version in
         // OCaml is very obviously not tail recursive).  As a result, it is not obviously correct;
@@ -238,7 +241,7 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
                 },
                 StackMember::App(ref a) => {
                     // expensive, makes a Vec
-                    stk.append(a.iter().map( |t| (l.clone() /* expensive */, t.clone()))
+                    stk.append(a.iter().map( |t| (l.clone() /* expensive */, t.clone(set)))
                                        .collect());
                 },
                 StackMember::Proj(_, _, p, b, _) => {
@@ -246,17 +249,17 @@ impl<'a, 'b, Inst, Shft> Stack<'a, 'b, Inst, Shft> {
                 },
                 StackMember::Fix(ref fx, ref a, _) => {
                     let mut lfx = l.clone(); // expensive
-                    let pa = a.to_pure(&mut lfx, ctx)?;
-                    stk.push(ZL::Fix(lfx, fx.clone(), pa));
+                    let pa = a.to_pure(set, &mut lfx, ctx)?;
+                    stk.push(ZL::Fix(lfx, fx.clone(set), pa));
                 },
                 StackMember::CaseT(o, ref env, _) => {
                     let (_, ref p, _, ref br) = **o;
                     stk.push(ZL::Case(o, l.clone() /* expensive */,
-                                      env.mk_clos(p, ctx)?, env.mk_clos_vect(br, ctx)?));
+                                      env.mk_clos(set, p, ctx)?, env.mk_clos_vect(set, br, ctx)?));
                 },
                 StackMember::Case(o, ref p, ref br, _) => {
-                    stk.push(ZL::Case(o, l.clone() /* expensive */, p.clone(),
-                                      br.clone() /* expensive */));
+                    stk.push(ZL::Case(o, l.clone() /* expensive */, p.clone(set),
+                                      closure::clone_vec(br, set) /* expensive */));
                 },
             }
         }
@@ -284,13 +287,16 @@ impl Constr {
             Constr::Lambda(_) | Constr::Fix(_) | Constr::CoFix(_) => Ok(()),
             _ => {
                 let mut globals = Globals::default();
-                *self = {
-                    let ref ctx = Context::new();
-                    let mut infos = Infos::create(Reds::BETAIOTAZETA,
+                *self = Set::new( |set| {
+                    let constr_arena = Arena::with_capacity(0x2000);
+                    // (8 * 2^20, just an arbitrary number to start with).
+                    let term_arena = Arena::with_capacity(0x800000);
+                    let ctx = Context::new(&term_arena, &constr_arena);
+                    let mut infos = Infos::create(set, Reds::BETAIOTAZETA,
                                                   iter::empty())?;
-                    let v = self.inject(ctx)?;
-                    v.whd_val(&mut infos, &mut globals, ctx)?
-                };
+                    let v = self.inject(&infos.set, ctx)?;
+                    v.whd_val(&mut infos, &mut globals, ctx)
+                } )?;
                 Ok(())
             }
         }
@@ -308,13 +314,16 @@ impl Constr {
             Constr::Fix(_) | Constr::CoFix(_) => Ok(()),
             _ => {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
-                *self = {
-                    let ref ctx = Context::new();
-                    let mut infos = Infos::create(Reds::BETADELTAIOTA,
+                *self = Set::new( |set| {
+                    let constr_arena = Arena::with_capacity(0x2000);
+                    // (8 * 2^20, just an arbitrary number to start with).
+                    let term_arena = Arena::with_capacity(0x800000);
+                    let ctx = Context::new(&term_arena, &constr_arena);
+                    let mut infos = Infos::create(set, Reds::BETADELTAIOTA,
                                                   rel_context.iter_mut())?;
-                    let v = self.inject(ctx)?;
-                    v.whd_val(&mut infos, globals, ctx)?
-                };
+                    let v = self.inject(&infos.set, ctx)?;
+                    v.whd_val(&mut infos, globals, ctx)
+                } )?;
                 Ok(())
             }
         }
@@ -332,13 +341,16 @@ impl Constr {
             Constr::Fix(_) | Constr::CoFix(_) | Constr::LetIn(_) => Ok(()),
             _ => {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
-                *self = {
-                    let ref ctx = Context::new();
-                    let mut infos = Infos::create(Reds::BETADELTAIOTANOLET,
+                *self = Set::new( |set| {
+                    let constr_arena = Arena::with_capacity(0x2000);
+                    // (8 * 2^20, just an arbitrary number to start with).
+                    let term_arena = Arena::with_capacity(0x800000);
+                    let ctx = Context::new(&term_arena, &constr_arena);
+                    let mut infos = Infos::create(set, Reds::BETADELTAIOTANOLET,
                                                   rel_context.iter_mut())?;
-                    let v = self.inject(ctx)?;
-                    v.whd_val(&mut infos, globals, ctx)?
-                };
+                    let v = self.inject(&infos.set, ctx)?;
+                    v.whd_val(&mut infos, globals, ctx)
+                } )?;
                 Ok(())
             }
         }
@@ -394,24 +406,30 @@ impl Universes {
     }
 }
 
-fn compare_stacks<'a, 'c, 'b, I, S, T, F, FMind>
-    (f: &mut F, fmind: &mut FMind,
-     lft1: &mut Lift, stk1: &Stack<'a, 'b, I, S>,
-     lft2: &mut Lift, stk2: &Stack<'c, 'b, I, S>,
-     ctx: &'a Context<'a, 'b>, ctx_: &'c Context<'c, 'b>,
+fn compare_stacks<'id, 'id_, 'a, 'c, 'b, I, S, T, F, FMind>
+    (infos: &mut ClosInfos<'id, 'a, 'b>, infos_: &mut ClosInfos<'id_, 'c, 'b>,
+     f: &mut F, fmind: &mut FMind,
+     lft1: &mut Lift, stk1: &Stack<'id, 'a, 'b, I, S>,
+     lft2: &mut Lift, stk2: &Stack<'id_, 'c, 'b, I, S>,
+     ctx: Context<'id, 'a, 'b>, ctx_: Context<'id_, 'c, 'b>,
      env: &mut T) -> ConvResult<()>
     where
-        F: FnMut(&mut T, (&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'c, 'b>)) -> ConvResult<()>,
-        FMind: FnMut(&T, &Ind, &Ind) -> bool,
+        F: for<'r> FnMut(&'r mut ClosInfos<'id, 'a, 'b>, &'r mut ClosInfos<'id_, 'c, 'b>,
+                         &'r mut T, (&Lift, FConstr<'id, 'a, 'b>),
+              (&Lift, FConstr<'id_, 'c, 'b>)) -> ConvResult<()>,
+        FMind: Fn(&T, &Ind, &Ind) -> bool,
 {
     /// Prerequisite: call with stacks of the same shape.
-    fn cmp_rec<'a, 'c, 'b, T, F, FMind>
-        (f: &mut F, fmind: &mut FMind,
-         pstk1: LftConstrStack<'a, 'b>,
-         pstk2: LftConstrStack<'c, 'b>,
+    fn cmp_rec<'id, 'id_, 'a, 'c, 'b, T, F, FMind>
+        (infos: &mut ClosInfos<'id, 'a, 'b>, infos_: &mut ClosInfos<'id_, 'c, 'b>,
+         f: &mut F, fmind: &mut FMind,
+         pstk1: LftConstrStack<'id, 'a, 'b>,
+         pstk2: LftConstrStack<'id_, 'c, 'b>,
          env: &mut T) -> ConvResult<()>
         where
-            F: FnMut(&mut T, (&Lift, FConstr<'a, 'b>), (&Lift, FConstr<'c, 'b>)) -> ConvResult<()>,
+            F: for<'r> FnMut(&'r mut ClosInfos<'id, 'a, 'b>, &'r mut ClosInfos<'id_, 'c, 'b>,
+                             &'r mut T, (&Lift, FConstr<'id, 'a, 'b>),
+                             (&Lift, FConstr<'id_, 'c, 'b>)) -> ConvResult<()>,
             FMind: FnMut(&T, &Ind, &Ind) -> bool,
     {
         // The stacks have the same shape, so we don't need to worry about these mismatching.
@@ -421,12 +439,12 @@ fn compare_stacks<'a, 'c, 'b, I, S, T, F, FMind>
             match (z1, z2) {
                 (ZL::App(a1), ZL::App(a2)) => {
                     for ((l1, c1), (l2, c2)) in a1.into_iter().zip(a2.into_iter()) {
-                        f(env, (&l1, c1), (&l2, c2))?;
+                        f(infos, infos_, env, (&l1, c1), (&l2, c2))?;
                     }
                 },
                 (ZL::Fix(lfx1, fx1, a1), ZL::Fix(lfx2, fx2, a2)) => {
-                    f(env, (&lfx1, fx1), (&lfx2, fx2))?;
-                    cmp_rec(f, fmind, a1, a2, env)?;
+                    f(infos, infos_, env, (&lfx1, fx1), (&lfx2, fx2))?;
+                    cmp_rec(infos, infos_, f, fmind, a1, a2, env)?;
                 },
                 (ZL::Proj(c1, _, _), ZL::Proj(c2, _, _)) => {
                     if !c1.eq_con_chk(c2) { return Err(Box::new(ConvError::NotConvertible)) }
@@ -439,9 +457,9 @@ fn compare_stacks<'a, 'c, 'b, I, S, T, F, FMind>
                     if !fmind(env, &ci1.ind, &ci2.ind) {
                         return Err(Box::new(ConvError::NotConvertible))
                     }
-                    f(env, (&l1, p1), (&l2, p2))?;
+                    f(infos, infos_, env, (&l1, p1), (&l2, p2))?;
                     for (c1, c2) in br1.into_iter().zip(br2.into_iter()) {
-                        f(env, (&l1, c1), (&l2, c2))?;
+                        f(infos, infos_, env, (&l1, c1), (&l2, c2))?;
                     }
                 },
                 _ => unreachable!("Stacks should have the same shape."),
@@ -451,7 +469,9 @@ fn compare_stacks<'a, 'c, 'b, I, S, T, F, FMind>
     }
 
     if stk1.compare_shape(stk2)? {
-        cmp_rec(f, fmind, stk1.to_pure(lft1, ctx)?, stk2.to_pure(lft2, ctx_)?, env)
+        let stk1 = stk1.to_pure(&infos.set, lft1, ctx)?;
+        let stk2 = stk2.to_pure(&infos_.set, lft2, ctx_)?;
+        cmp_rec(infos, infos_, f, fmind, stk1, stk2, env)
     } else {
         Err(Box::new(ConvError::NotConvertible))
     }
@@ -508,8 +528,8 @@ impl<'b> TableKeyC<'b> {
 }
 
 impl<'g> Globals<'g> {
-    fn unfold_projection_infos<'a, 'b, I, S>(&self, p: &'b Cst, b: bool,
-                                             i: I) -> ConvResult<StackMember<'a, 'b, I, S>> {
+    fn unfold_projection_infos<'id, 'a, 'b, I, S>
+        (&self, p: &'b Cst, b: bool, i: I) -> ConvResult<StackMember<'id, 'a, 'b, I, S>> {
         let pb = self.lookup_projection(p)
                      .ok_or_else(|| Box::new(ConvError::NotFound))??;
         // TODO: Verify that npars and arg being within usize is checked at some
@@ -520,15 +540,16 @@ impl<'g> Globals<'g> {
     }
 }
 
-impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
+impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
     /// Conversion between [lft1]term1 and [lft2]term2.
     /// Note: term1 and term2 must be type-checked beforehand!
-    fn ccnv<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'c, 'b>,
+    fn ccnv<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'id_, 'c, 'b>,
                       univ: &Universes, enga: &Engagement,
                       globals: &'r mut Globals<'g>, cv_pb: ConvPb,
-                      lft1: &Lift, lft2: &Lift, term1: FConstr<'a, 'b>, term2: FConstr<'c, 'b>,
+                      lft1: &Lift, lft2: &Lift,
+                      term1: FConstr<'id, 'a, 'b>, term2: FConstr<'id_, 'c, 'b>,
                       i: I, s: S,
-                      ctx: &'a Context<'a, 'b>, ctx_: &'c Context<'c, 'b>) -> ConvResult<()>
+                      ctx: Context<'id, 'a, 'b>, ctx_: Context<'id_, 'c, 'b>) -> ConvResult<()>
         where
             I: Clone,
             S: Clone,
@@ -542,14 +563,16 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
     /// Conversion between [lft1](hd1 v1) and [lft2](hd2 v2)
     /// Note: term1 and term2 must be type-checked beforehand in the context of stk1 and stk2,
     /// respectively!
-    fn eqappr<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'c, 'b>,
+    fn eqappr<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'id_, 'c, 'b>,
                         univ: &Universes, enga: &Engagement,
                         globals: &'r mut Globals<'g>, mut cv_pb: ConvPb,
-                        lft1: &Lift, mut hd1: FConstr<'a, 'b>, v1: &mut Stack<'a, 'b, I, S>,
-                        lft2: &Lift, mut hd2: FConstr<'c, 'b>, v2: &mut Stack<'c, 'b, I, S>,
+                        lft1: &Lift, mut hd1: FConstr<'id, 'a, 'b>,
+                        v1: &mut Stack<'id, 'a, 'b, I, S>,
+                        lft2: &Lift, mut hd2: FConstr<'id_, 'c, 'b>,
+                        v2: &mut Stack<'id_, 'c, 'b, I, S>,
                         i: I, s: S,
-                        ctx: &'a Context<'a, 'b>,
-                        ctx_: &'c Context<'c, 'b>) -> ConvResult<()>
+                        ctx: Context<'id, 'a, 'b>,
+                        ctx_: Context<'id_, 'c, 'b>) -> ConvResult<()>
         where
             I: Clone,
             S: Clone,
@@ -574,9 +597,9 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
             // are using separate resources.  We guarantee this by requiring them to be at
             // different parametric lifetimes, so we never use (for example) a term allocated in
             // ctx with v2.  As a result, we know that in order to modify an FTerm created in ctx,
-            // you need a reference with lifetime 'a to an FTerm<'a, 'b>; but there's no way such a
-            // reference could work with 'c unless 'a = 'c, and we know 'a ≠ 'c because we only
-            // call this function initially with arenas at incompatible lifetimes (through
+            // you need a reference with lifetime 'a to an FTerm<'id, 'a, 'b>; but there's no way
+            // shc a reference could work with 'c unless 'a = 'c, and we know 'a ≠ 'c because we
+            // only call this function initially with arenas at incompatible lifetimes (through
             // clos_fconv).  The only other way to make is_whnf fail would be to change a Fix
             // Constr to something else, and the only way we change Constrs in a shared way is
             // through mutable references in Globals, which only change monotonically via forcing;
@@ -592,8 +615,8 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
             let mut el2 = lft2.as_ref().clone();
             v1.el(&mut el1)?;
             v2.el(&mut el2)?;
-            match (hd1.fterm().expect("Tried to lift a locked term"),
-                   hd2.fterm().expect("Tried to lift a locked term")) {
+            match (hd1.fterm(&self.set).expect("Tried to lift a locked term"),
+                   hd2.fterm(&infos_.set).expect("Tried to lift a locked term")) {
                 // case of leaves
                 (&FTerm::Atom(a1), &FTerm::Atom(a2)) => match (a1, a2) {
                     (&Constr::Sort(ref s1), &Constr::Sort(ref s2)) => {
@@ -628,13 +651,14 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                             // else the oracle tells which constant is to be expanded.
                             if fl1.oracle_order(&fl2) {
                                 match self.unfold_reference(globals, fl1, ctx)?
-                                          .map( |def1| def1.clone() ) {
+                                          .map( |(set, def1)| def1.clone(set) ) {
                                     Some(def1) => {
                                         hd1 = v1.whd_stack(self, globals, def1, ctx,
                                                            i.clone(), s.clone())?;
                                     },
                                     None => match infos_.unfold_reference(globals, fl2, ctx_)?
-                                                        .map( |def2| def2.clone() ) {
+                                                        .map( |(set, def2)|
+                                                              def2.clone(set) ) {
                                         Some(def2) => {
                                             hd2 = v2.whd_stack(infos_, globals, def2, ctx_,
                                                                i.clone(), s.clone())?;
@@ -644,13 +668,14 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                                 }
                             } else {
                                 match infos_.unfold_reference(globals, fl2, ctx_)?
-                                            .map( |def2| def2.clone() ) {
+                                            .map( |(set, def2)| def2.clone(set) ) {
                                     Some(def2) => {
                                         hd2 = v2.whd_stack(infos_, globals, def2, ctx_,
                                                            i.clone(), s.clone())?;
                                     },
                                     None => match self.unfold_reference(globals, fl1, ctx)?
-                                                      .map( |def1| def1.clone() ) {
+                                                      .map( |(set, def1)|
+                                                            def1.clone(set) ) {
                                         Some(def1) => {
                                             hd1 = v1.whd_stack(self, globals, def1, ctx,
                                                                i.clone(), s.clone())?;
@@ -668,13 +693,17 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                 (&FTerm::Proj(p1, b1, ref def1), _) => {
                     let s1 = globals.unfold_projection_infos(p1, b1, i.clone())?;
                     v1.push(s1);
-                    hd1 = v1.whd_stack(self, globals, def1.clone(), ctx, i.clone(), s.clone())?;
+                    let def1 = def1.clone(&self.set);
+                    hd1 = v1.whd_stack(self, globals, def1,
+                                       ctx, i.clone(), s.clone())?;
                     // Loop through and try again with the projection unfolded.
                 },
                 (_, &FTerm::Proj(p2, b2, ref def2)) => {
                     let s2 = globals.unfold_projection_infos(p2, b2, i.clone())?;
                     v2.push(s2);
-                    hd2 = v2.whd_stack(infos_, globals, def2.clone(), ctx_, i.clone(), s.clone())?;
+                    let def2 = def2.clone(&infos_.set);
+                    hd2 = v2.whd_stack(infos_, globals, def2,
+                                       ctx_, i.clone(), s.clone())?;
                     // Loop through and try again with the projection unfolded.
                 },
                 // other constructors
@@ -683,8 +712,10 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                     // Inconsistency: we tolerate that v1, v2 contain shift and update but
                     // we throw them away
                     assert!(v1.is_empty() && v2.is_empty());
-                    let (_, ty1, bd1) = FTerm::dest_flambda(Subs::mk_clos, ty1, b1, e1, ctx)?;
-                    let (_, ty2, bd2) = FTerm::dest_flambda(Subs::mk_clos, ty2, b2, e2, ctx_)?;
+                    let (_, ty1, bd1) = FTerm::dest_flambda(&self.set, Subs::mk_clos,
+                                                            ty1, b1, e1, ctx)?;
+                    let (_, ty2, bd2) = FTerm::dest_flambda(&infos_.set, Subs::mk_clos,
+                                                            ty2, b2, e2, ctx_)?;
                     // FIXME: Ew, non-tail recursion!  Can we do the same trick we do for Proj
                     // somehow?
                     self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2, ty1, ty2,
@@ -712,8 +743,11 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                     // Luo's system
                     // FIXME: Ew, non-tail recursion!  Can we do the same trick we do for Proj
                     // somehow?
+                    let c1 = c1.clone(&self.set);
+                    let c_1 = c_1.clone(&infos_.set);
                     self.ccnv(infos_, univ, enga, globals,
-                              ConvPb::Conv, &el1, &el2, c1.clone(), c_1.clone(),
+                              ConvPb::Conv, &el1, &el2,
+                              c1, c_1,
                               i.clone(), s.clone(), ctx, ctx_)?;
                     el1.lift()?;
                     el2.lift()?;
@@ -721,8 +755,8 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                     // position).
                     lft1 = Cow::Owned(el1);
                     lft2 = Cow::Owned(el2);
-                    hd1 = c2.clone();
-                    hd2 = c_2.clone();
+                    hd1 = c2.clone(&self.set);
+                    hd2 = c_2.clone(&infos_.set);
                     // TODO: Figure out stack truncation here (also applies to ccnv above); see
                     // FTerm::Lambda conversion for more details.
                     v1.clear();
@@ -736,7 +770,8 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                         const E : &'static str = "conversion was given an unreduced term (FLamda)";
                         return Err(Box::new(ConvError::Anomaly(E.into())))
                     }
-                    let (_, _, bd1) = FTerm::dest_flambda(Subs::mk_clos, ty1, b1, e1, ctx)?;
+                    let (_, _, bd1) = FTerm::dest_flambda(&self.set, Subs::mk_clos,
+                                                          ty1, b1, e1, ctx)?;
                     v2.eta_expand_stack(ctx_, s.clone());
                     let mut el1 = lft1.into_owned();
                     el1.lift()?;
@@ -757,7 +792,8 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                         const E : &'static str = "conversion was given an unreduced term (FLamda)";
                         return Err(Box::new(ConvError::Anomaly(E.into())));
                     }
-                    let (_, _, bd2) = FTerm::dest_flambda(Subs::mk_clos, ty2, b2, e2, ctx_)?;
+                    let (_, _, bd2) = FTerm::dest_flambda(&infos_.set, Subs::mk_clos,
+                                                          ty2, b2, e2, ctx_)?;
                     v1.eta_expand_stack(ctx, s.clone());
                     let mut el1 = lft1.into_owned();
                     el1.lift()?;
@@ -774,7 +810,7 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                 },
                 // only one constant or defined rel (no defined vars in the checker)
                 (&FTerm::Flex(fl1), c2) => match self.unfold_reference(globals, fl1, ctx)?
-                                                     .map( |def1| def1.clone() ) {
+                                                     .map( |(set, def1)| def1.clone(set) ) {
                     Some(def1) => {
                         hd1 = v1.whd_stack(self, globals, def1, ctx, i.clone(), s.clone())?;
                     },
@@ -785,6 +821,7 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                             // OCaml implementation here.  See eta_expand_ind_stack definition for
                             // more information.
                             match Stack::eta_expand_ind_stack(globals,
+                                                              &mut infos_.set, &mut self.set,
                                                               ind2, hd2, v2, hd1, v1, ctx_, ctx)? {
                                 Some((mut v2, mut v1)) => {
                                     return self.convert_stacks(infos_, univ, enga, globals,
@@ -799,7 +836,7 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                     // Loop through again.
                 },
                 (c1, &FTerm::Flex(fl2)) => match infos_.unfold_reference(globals, fl2, ctx_)?
-                                                       .map( |def2| def2.clone() ) {
+                                                       .map( |(set, def2)| def2.clone(set) ) {
                     Some(def2) => {
                         hd2 = v2.whd_stack(infos_, globals, def2, ctx_, i.clone(), s.clone())?;
                     },
@@ -810,6 +847,7 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                             // OCaml implementation here.  See eta_expand_ind_stack definition for
                             // more information.
                             match Stack::eta_expand_ind_stack(globals,
+                                                              &mut self.set, &mut infos_.set,
                                                               ind1, hd1, v1, hd2, v2, ctx, ctx_)? {
                                 Some((mut v1, mut v2)) => {
                                     return self.convert_stacks(infos_, univ, enga, globals,
@@ -853,6 +891,7 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                     // OCaml implementation here.  See eta_expand_ind_stack definition for
                     // more information.
                     match Stack::eta_expand_ind_stack(globals,
+                                                      &mut self.set, &mut infos_.set,
                                                       ind1, hd1, v1, hd2, v2, ctx, ctx_)? {
                         Some((mut v1, mut v2)) => {
                             return self.convert_stacks(infos_, univ, enga, globals,
@@ -868,6 +907,7 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                     // OCaml implementation here.  See eta_expand_ind_stack definition for
                     // more information.
                     match Stack::eta_expand_ind_stack(globals,
+                                                      &mut infos_.set, &mut self.set,
                                                       ind2, hd2, v2, hd1, v1, ctx_, ctx)? {
                         Some((mut v2, mut v1)) => {
                             return self.convert_stacks(infos_, univ, enga, globals,
@@ -888,14 +928,14 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                         // checking that the lengths are the same.
                         let n = cl1.len();
                         for (ty1, ty2) in tys1.iter().zip(tys2.iter()) {
-                            let fty1 = e1.mk_clos(ty1, ctx)?;
-                            let fty2 = e2.mk_clos(ty2, ctx_)?;
+                            let fty1 = e1.mk_clos(&self.set, ty1, ctx)?;
+                            let fty2 = e2.mk_clos(&infos_.set, ty2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
                             self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
                                       fty1, fty2, i.clone(), s.clone(), ctx, ctx_)?;
                         }
-                        let mut e1 = e1.clone(); // expensive
-                        let mut e2 = e2.clone(); // expensive
+                        let mut e1 = e1.clone(&self.set); // expensive
+                        let mut e2 = e2.clone(&infos_.set); // expensive
                         if let Some(n) = NonZero::new(n) {
                             // TODO: Figure out whether this block should be reachable.  If not, we
                             // should probably assert; if so, we might consider special casing the
@@ -907,8 +947,8 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                             el2.liftn(n)?;
                         }
                         for (c1, c2) in cl1.iter().zip(cl2.iter()) {
-                            let fc1 = e1.mk_clos(c1, ctx)?;
-                            let fc2 = e2.mk_clos(c2, ctx_)?;
+                            let fc1 = e1.mk_clos(&self.set, c1, ctx)?;
+                            let fc2 = e2.mk_clos(&infos_.set, c2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
                             self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
                                       fc1, fc2, i.clone(), s.clone(), ctx, ctx_)?;
@@ -930,14 +970,14 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                         // are the same.
                         let n = cl1.len();
                         for (ty1, ty2) in tys1.iter().zip(tys2.iter()) {
-                            let fty1 = e1.mk_clos(ty1, ctx)?;
-                            let fty2 = e2.mk_clos(ty2, ctx_)?;
+                            let fty1 = e1.mk_clos(&self.set, ty1, ctx)?;
+                            let fty2 = e2.mk_clos(&infos_.set, ty2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
                             self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
                                       fty1, fty2, i.clone(), s.clone(), ctx, ctx_)?;
                         }
-                        let mut e1 = e1.clone(); // expensive
-                        let mut e2 = e2.clone(); // expensive
+                        let mut e1 = e1.clone(&self.set); // expensive
+                        let mut e2 = e2.clone(&infos_.set); // expensive
                         if let Some(n) = NonZero::new(n) {
                             // TODO: Figure out whether this block should be reachable.  If not, we
                             // should probably assert; if so, we might consider special casing the
@@ -949,8 +989,8 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
                             el2.liftn(n)?;
                         }
                         for (c1, c2) in cl1.iter().zip(cl2.iter()) {
-                            let fc1 = e1.mk_clos(c1, ctx)?;
-                            let fc2 = e2.mk_clos(c2, ctx_)?;
+                            let fc1 = e1.mk_clos(&self.set, c1, ctx)?;
+                            let fc2 = e2.mk_clos(&infos_.set, c2, ctx_)?;
                             // FIXME: Ugh, this is not tail recursive!
                             self.ccnv(infos_, univ, enga, globals, ConvPb::Conv, &el1, &el2,
                                       fc1, fc2, i.clone(), s.clone(), ctx, ctx_)?;
@@ -977,14 +1017,14 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
     }
 
     /// Note: stk1 and stk2 must be type-checked beforehand!
-    fn convert_stacks<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'c, 'b>,
+    fn convert_stacks<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'id_, 'c, 'b>,
                                 univ: &Universes, enga: &Engagement,
                                 globals: &'r mut Globals<'g>,
                                 lft1: &Lift, lft2: &Lift,
-                                stk1: &Stack<'a, 'b, I, S>, stk2: &Stack<'c, 'b, I, S>,
+                                stk1: &Stack<'id, 'a, 'b, I, S>, stk2: &Stack<'id_, 'c, 'b, I, S>,
                                 i: I, s: S,
-                                ctx: &'a Context<'a, 'b>,
-                                ctx_: &'c Context<'c, 'b>) -> ConvResult<()>
+                                ctx: Context<'id, 'a, 'b>,
+                                ctx_: Context<'id_, 'c, 'b>) -> ConvResult<()>
         where
             I: Clone,
             S: Clone,
@@ -992,19 +1032,19 @@ impl<'a, 'c, 'b, 'g> ClosInfos<'a, 'b> where 'g: 'b {
         let mut lft1 = lft1.clone(); // expensive, but shouldn't outlive this block.
         let mut lft2 = lft2.clone(); // expensive, but shouldn't outlive this block.
         compare_stacks(
-            &mut |o: &mut (&'r mut Self, &'r mut ClosInfos<'c, 'b>, &'r mut Globals<'g>),
+            self, infos_,
+            &mut |infos, infos_,
+                  globals,
                   (l1, t1), (l2, t2)| {
-                let (ref mut infos, ref mut infos_, ref mut globals) = *o;
                 infos.ccnv(infos_, univ, enga, globals, ConvPb::Conv, l1, l2, t1, t2,
                            i.clone(), s.clone(), ctx, ctx_)
             },
-            &mut |o: &(&'r mut Self, &'r mut ClosInfos<'c, 'b>, &'r mut Globals<'g>), ind1, ind2| {
-                let (_, _, ref globals) = *o;
+            &mut |globals, ind1, ind2| {
                 globals.mind_equiv(ind1, ind2)
             },
             &mut lft1, stk1, &mut lft2, stk2,
             ctx, ctx_,
-            &mut (self, infos_, globals)
+            globals
         )
     }
 }
@@ -1017,18 +1057,27 @@ impl<'b, 'g> Env<'b, 'g> {
         let ref mut rel_context_ = rel_context.clone();
         let univ = stratification.universes();
         let enga = stratification.engagement();
-        let ref ctx = Context::new();
-        let ref ctx_ = Context::new();
-        let mut infos =
-            Infos::create(if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
-                          rel_context.iter_mut())?;
-        let mut infos_ =
-            Infos::create(if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
-                          rel_context_.iter_mut())?;
-        let v1 = t1.inject(ctx)?;
-        let v2 = t2.inject(ctx_)?;
-        infos.ccnv(&mut infos_, univ, enga, globals,
-                   cv_pb, &Lift::id(), &Lift::id(), v1, v2, (), (), ctx, ctx_)
+        Set::new( |set| Set::new( |set_| {
+            let constr_arena = Arena::<Constr>::with_capacity(0x2000);
+            let constr_arena_ = Arena::<Constr>::with_capacity(0x2000);
+            // (8 * 2^20, just an arbitrary number to start with).
+            let term_arena = Arena::with_capacity(0x800000);
+            let term_arena_ = Arena::with_capacity(0x800000);
+            let ctx = Context::new(&term_arena, &constr_arena);
+            let ctx_ = Context::new(&term_arena_, &constr_arena_);
+            let mut infos =
+                Infos::create(set,
+                              if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
+                              rel_context.iter_mut())?;
+            let mut infos_ =
+                Infos::create(set_,
+                              if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
+                              rel_context_.iter_mut())?;
+            let v1 = t1.inject(&infos.set, ctx)?;
+            let v2 = t2.inject(&infos_.set, ctx_)?;
+            infos.ccnv(&mut infos_, univ, enga, globals,
+                       cv_pb, &Lift::id(), &Lift::id(), v1, v2, (), (), ctx, ctx_)
+        } ))
     }
 
     /// Note: t1 and t2 must be type-checked beforehand!
@@ -1127,7 +1176,7 @@ impl<'b, 'g> Env<'b, 'g> {
                 },
                 Constr::LetIn(o) => {
                     let (ref x, ref b, ref t, ref c) = *o;
-                    let d = RDecl::LocalDef(x.clone(), b.clone(), ORef(Rc::from(t.clone())));
+                    let d = RDecl::LocalDef(x.clone(), b.clone(), ORef(Arc::from(t.clone())));
                     self.push_rel(d.clone());
                     l.push(d);
                     ty = c.clone();
@@ -1161,7 +1210,7 @@ impl<'b, 'g> Env<'b, 'g> {
                 },
                 Constr::LetIn(o) => {
                     let (ref x, ref b, ref t, ref c) = *o;
-                    let d = RDecl::LocalDef(x.clone(), b.clone(), ORef(Rc::from(t.clone())));
+                    let d = RDecl::LocalDef(x.clone(), b.clone(), ORef(Arc::from(t.clone())));
                     self.push_rel(d.clone());
                     l.push(d);
                     ty = c.clone();
