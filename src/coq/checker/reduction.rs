@@ -412,12 +412,20 @@ fn compare_stacks<'id, 'id_, 'a, 'c, 'b, I, S, T, F, FMind>
      lft1: &mut Lift, stk1: &Stack<'id, 'a, 'b, I, S>,
      lft2: &mut Lift, stk2: &Stack<'id_, 'c, 'b, I, S>,
      ctx: Context<'id, 'a, 'b>, ctx_: Context<'id_, 'c, 'b>,
-     env: &mut T) -> ConvResult<()>
+     env: &T) -> ConvResult<()>
     where
         F: for<'r> FnMut(&'r mut ClosInfos<'id, 'a, 'b>, &'r mut ClosInfos<'id_, 'c, 'b>,
-                         &'r mut T, (&Lift, FConstr<'id, 'a, 'b>),
-              (&Lift, FConstr<'id_, 'c, 'b>)) -> ConvResult<()>,
+                         &'r T, (&Lift, FConstr<'id, 'a, 'b>),
+                         (&Lift, FConstr<'id_, 'c, 'b>),
+                         Context<'id, 'a, 'b>, Context<'id_, 'c, 'b>) -> ConvResult<()>,
         FMind: Fn(&T, &Ind, &Ind) -> bool,
+        F: Send,
+        for<'id__> ClosInfos<'id__, 'a, 'b> : Send,
+        for<'id__> FConstr<'id__, 'a, 'b>: Send + Sync,
+        Lift: Send,
+        Lift: Sync,
+        for<'id__> Stack<'id__, 'a, 'b, I, S>: Sync,
+        T: Sync,
 {
     /// Prerequisite: call with stacks of the same shape.
     fn cmp_rec<'id, 'id_, 'a, 'c, 'b, T, F, FMind>
@@ -425,11 +433,13 @@ fn compare_stacks<'id, 'id_, 'a, 'c, 'b, I, S, T, F, FMind>
          f: &mut F, fmind: &mut FMind,
          pstk1: LftConstrStack<'id, 'a, 'b>,
          pstk2: LftConstrStack<'id_, 'c, 'b>,
-         env: &mut T) -> ConvResult<()>
+         ctx: Context<'id, 'a, 'b>, ctx_: Context<'id_, 'c, 'b>,
+         env: &T) -> ConvResult<()>
         where
             F: for<'r> FnMut(&'r mut ClosInfos<'id, 'a, 'b>, &'r mut ClosInfos<'id_, 'c, 'b>,
-                             &'r mut T, (&Lift, FConstr<'id, 'a, 'b>),
-                             (&Lift, FConstr<'id_, 'c, 'b>)) -> ConvResult<()>,
+                             &'r T, (&Lift, FConstr<'id, 'a, 'b>),
+                             (&Lift, FConstr<'id_, 'c, 'b>),
+                             Context<'id, 'a, 'b>, Context<'id_, 'c, 'b>) -> ConvResult<()>,
             FMind: FnMut(&T, &Ind, &Ind) -> bool,
     {
         // The stacks have the same shape, so we don't need to worry about these mismatching.
@@ -439,12 +449,12 @@ fn compare_stacks<'id, 'id_, 'a, 'c, 'b, I, S, T, F, FMind>
             match (z1, z2) {
                 (ZL::App(a1), ZL::App(a2)) => {
                     for ((l1, c1), (l2, c2)) in a1.into_iter().zip(a2.into_iter()) {
-                        f(infos, infos_, env, (&l1, c1), (&l2, c2))?;
+                        f(infos, infos_, env, (&l1, c1), (&l2, c2), ctx, ctx_)?;
                     }
                 },
                 (ZL::Fix(lfx1, fx1, a1), ZL::Fix(lfx2, fx2, a2)) => {
-                    f(infos, infos_, env, (&lfx1, fx1), (&lfx2, fx2))?;
-                    cmp_rec(infos, infos_, f, fmind, a1, a2, env)?;
+                    f(infos, infos_, env, (&lfx1, fx1), (&lfx2, fx2), ctx, ctx_)?;
+                    cmp_rec(infos, infos_, f, fmind, a1, a2, ctx, ctx_, env)?;
                 },
                 (ZL::Proj(c1, _, _), ZL::Proj(c2, _, _)) => {
                     if !c1.eq_con_chk(c2) { return Err(Box::new(ConvError::NotConvertible)) }
@@ -457,9 +467,9 @@ fn compare_stacks<'id, 'id_, 'a, 'c, 'b, I, S, T, F, FMind>
                     if !fmind(env, &ci1.ind, &ci2.ind) {
                         return Err(Box::new(ConvError::NotConvertible))
                     }
-                    f(infos, infos_, env, (&l1, p1), (&l2, p2))?;
+                    f(infos, infos_, env, (&l1, p1), (&l2, p2), ctx, ctx_)?;
                     for (c1, c2) in br1.into_iter().zip(br2.into_iter()) {
-                        f(infos, infos_, env, (&l1, c1), (&l2, c2))?;
+                        f(infos, infos_, env, (&l1, c1), (&l2, c2), ctx, ctx_)?;
                     }
                 },
                 _ => unreachable!("Stacks should have the same shape."),
@@ -471,7 +481,7 @@ fn compare_stacks<'id, 'id_, 'a, 'c, 'b, I, S, T, F, FMind>
     if stk1.compare_shape(stk2)? {
         let stk1 = stk1.to_pure(&infos.set, lft1, ctx)?;
         let stk2 = stk2.to_pure(&infos_.set, lft2, ctx_)?;
-        cmp_rec(infos, infos_, f, fmind, stk1, stk2, env)
+        cmp_rec(infos, infos_, f, fmind, stk1, stk2, ctx, ctx_, env)
     } else {
         Err(Box::new(ConvError::NotConvertible))
     }
@@ -545,14 +555,14 @@ impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
     /// Note: term1 and term2 must be type-checked beforehand!
     fn ccnv<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'id_, 'c, 'b>,
                       univ: &Universes, enga: &Engagement,
-                      globals: &'r mut Globals<'g>, cv_pb: ConvPb,
+                      globals: &'r Globals<'g>, cv_pb: ConvPb,
                       lft1: &Lift, lft2: &Lift,
                       term1: FConstr<'id, 'a, 'b>, term2: FConstr<'id_, 'c, 'b>,
                       i: I, s: S,
                       ctx: Context<'id, 'a, 'b>, ctx_: Context<'id_, 'c, 'b>) -> ConvResult<()>
         where
-            I: Clone,
-            S: Clone,
+            I: Clone + Sync,
+            S: Clone + Sync,
     {
         self.eqappr(infos_, univ, enga, globals, cv_pb,
                     lft1, term1, &mut Stack::new(),
@@ -565,7 +575,7 @@ impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
     /// respectively!
     fn eqappr<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'id_, 'c, 'b>,
                         univ: &Universes, enga: &Engagement,
-                        globals: &'r mut Globals<'g>, mut cv_pb: ConvPb,
+                        globals: &'r Globals<'g>, mut cv_pb: ConvPb,
                         lft1: &Lift, mut hd1: FConstr<'id, 'a, 'b>,
                         v1: &mut Stack<'id, 'a, 'b, I, S>,
                         lft2: &Lift, mut hd2: FConstr<'id_, 'c, 'b>,
@@ -574,8 +584,8 @@ impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
                         ctx: Context<'id, 'a, 'b>,
                         ctx_: Context<'id_, 'c, 'b>) -> ConvResult<()>
         where
-            I: Clone,
-            S: Clone,
+            I: Clone + Sync,
+            S: Clone + Sync,
     {
         let mut lft1 = Cow::Borrowed(lft1);
         let mut lft2 = Cow::Borrowed(lft2);
@@ -1019,15 +1029,15 @@ impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
     /// Note: stk1 and stk2 must be type-checked beforehand!
     fn convert_stacks<'r, I, S>(&'r mut self, infos_: &'r mut ClosInfos<'id_, 'c, 'b>,
                                 univ: &Universes, enga: &Engagement,
-                                globals: &'r mut Globals<'g>,
+                                globals: &'r Globals<'g>,
                                 lft1: &Lift, lft2: &Lift,
                                 stk1: &Stack<'id, 'a, 'b, I, S>, stk2: &Stack<'id_, 'c, 'b, I, S>,
                                 i: I, s: S,
                                 ctx: Context<'id, 'a, 'b>,
                                 ctx_: Context<'id_, 'c, 'b>) -> ConvResult<()>
         where
-            I: Clone,
-            S: Clone,
+            I: Clone + Sync,
+            S: Clone + Sync,
     {
         let mut lft1 = lft1.clone(); // expensive, but shouldn't outlive this block.
         let mut lft2 = lft2.clone(); // expensive, but shouldn't outlive this block.
@@ -1035,7 +1045,7 @@ impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
             self, infos_,
             &mut |infos, infos_,
                   globals,
-                  (l1, t1), (l2, t2)| {
+                  (l1, t1), (l2, t2), ctx, ctx_| {
                 infos.ccnv(infos_, univ, enga, globals, ConvPb::Conv, l1, l2, t1, t2,
                            i.clone(), s.clone(), ctx, ctx_)
             },
@@ -1058,13 +1068,17 @@ impl<'b, 'g> Env<'b, 'g> {
         let univ = stratification.universes();
         let enga = stratification.engagement();
         Set::new( |set| Set::new( |set_| {
-            let constr_arena = Arena::<Constr>::with_capacity(0x2000);
-            let constr_arena_ = Arena::<Constr>::with_capacity(0x2000);
+            let constr_arenas = Arena::new();
+            let constr_arenas_ = Arena::new();
+            let constr_arena = constr_arenas.alloc(Arena::with_capacity(0x2000));
+            let constr_arena_ = constr_arenas_.alloc(Arena::with_capacity(0x2000));
+            let term_arenas = Arena::new();
+            let term_arenas_ = Arena::new();
             // (8 * 2^20, just an arbitrary number to start with).
-            let term_arena = Arena::with_capacity(0x800000);
-            let term_arena_ = Arena::with_capacity(0x800000);
-            let ctx = Context::new(&term_arena, &constr_arena);
-            let ctx_ = Context::new(&term_arena_, &constr_arena_);
+            let term_arena = term_arenas.alloc(Arena::with_capacity(0x800000));
+            let term_arena_ = term_arenas_.alloc(Arena::with_capacity(0x800000));
+            let ctx = Context::new(term_arena, constr_arena);
+            let ctx_ = Context::new(term_arena_, constr_arena_);
             let mut infos =
                 Infos::create(set,
                               if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },

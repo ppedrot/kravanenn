@@ -5,7 +5,7 @@ use std::hash::Hash;
 
 pub type Fail = !;
 
-#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, DeserializeState, Hash)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>> +
                                 Send + Sync + 'static"))]
@@ -80,7 +80,7 @@ pub struct Map<K, V>(pub HashMap<K, V>) where K: Hash + Eq;
 
 pub type HSet<V> = CMap<Int, Set<V>>;
 
-#[derive(Debug, Clone, DeserializeState, Eq, PartialEq)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>> +
                                 Send + Sync + 'static"))]
@@ -122,11 +122,11 @@ pub enum Name {
     Name(#[serde(deserialize_state)] Id), // non-anonymous identifier
 }
 
-#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, DeserializeState, Hash)]
 #[serde(deserialize_state = "Seed<'de>")]
-pub struct UId(Int, #[serde(deserialize_state)] Str, #[serde(deserialize_state)] Dp);
+pub struct UId(pub Int, #[serde(deserialize_state)] pub Str, #[serde(deserialize_state)] pub Dp);
 
-#[derive(Debug, Clone, DeserializeState, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, DeserializeState, Hash)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Mp {
     Dot(#[serde(deserialize_state)] ORef<Mp>, #[serde(deserialize_state)] Id),
@@ -135,18 +135,16 @@ pub enum Mp {
 }
 
 #[derive(Debug, Clone, DeserializeState)]
-// FIXME: Use OCaml's nice refhash caching.
-#[derive(Hash, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Kn {
     #[serde(deserialize_state)] canary: Any,
-    #[serde(deserialize_state)] modpath: Mp,
-    #[serde(deserialize_state)] dirpath: Dp,
-    #[serde(deserialize_state)] knlabel: Id,
-    refhash: Int,
+    #[serde(deserialize_state)] pub modpath: Mp,
+    #[serde(deserialize_state)] pub dirpath: Dp,
+    #[serde(deserialize_state)] pub label: Id,
+    pub refhash: Int,
 }
 
-#[derive(Debug, Clone, DeserializeState, Hash, Eq)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Cst {
     Dual(#[serde(deserialize_state)] ORef<(Kn, Kn)>), // user then canonical
@@ -175,7 +173,7 @@ pub struct Cons {
 
 /* kernel/univ */
 
-#[derive(Debug, Clone, DeserializeState, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum RawLevel {
     Prop,
@@ -184,14 +182,14 @@ pub enum RawLevel {
     Level(Int, #[serde(deserialize_state)] ORef<Dp>),
 }
 
-#[derive(Debug, Clone,DeserializeState, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Level {
     pub hash: Int,
     #[serde(deserialize_state)] pub data: RawLevel,
 }
 
-#[derive(Debug, Clone, DeserializeState, Eq, PartialEq)]
+#[derive(Debug, Clone, DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Expr(#[serde(deserialize_state)] pub Level, pub Int);
 
@@ -249,7 +247,7 @@ pub enum SortFam {
     InType,
 }
 
-#[derive(Debug, Clone,DeserializeState, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone,DeserializeState, Hash)]
 #[serde(deserialize_state = "Seed<'de>")]
 #[serde(bound(deserialize = "T: serde::de::DeserializeState<'de, Seed<'de>>"))]
 pub struct PUniverses<T>(#[serde(deserialize_state)] pub T, #[serde(deserialize_state)] pub Instance);
@@ -531,7 +529,7 @@ pub struct OneInd {
     #[serde(deserialize_state)] reloc_tbl: Any,
 }
 
-#[derive(Debug, Clone, DeserializeState, PartialEq)]
+#[derive(Debug, Clone, DeserializeState, PartialEq, Eq)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub enum Finite {
     Finite,

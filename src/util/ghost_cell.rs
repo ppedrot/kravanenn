@@ -69,6 +69,16 @@ pub struct Cell<'id, T> {
     value: UnsafeCell<T>,
 }
 
+/// As noted above, Set<'id> does not need to worry about what types it is protecting, since
+/// information about Send and Sync are already carried by the Cell<'id, T>.  Therefore, it's
+/// always safe to send a Set between threads.
+unsafe impl<'id> Send for Set<'id> {}
+
+/// As noted above, Set<'id> does not need to worry about what types it is protecting, since
+/// information about Send and Sync are already carried by the Cell<'id, T>.  Therefore, it's
+/// always safe to share a Set between threads.
+unsafe impl<'id> Sync for Set<'id> {}
+
 /// Cell<'id, T> implements Send iff T does.  This is safe because in order to access the T
 /// mutably within a Cell<T>, you need both a mutable reference to its owning set and an immutable
 /// reference to T, and both references must have the same lifetime.

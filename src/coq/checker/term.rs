@@ -541,7 +541,7 @@ impl Constr {
             (&Constr::Construct(ref o1), &Constr::Construct(ref o2)) => {
                 let PUniverses(ref i1, ref u1) = **o1;
                 let PUniverses(ref i2, ref u2) = **o2;
-                i1.idx == i2.idx && i1.ind.eq_ind_chk(&i2.ind) && u1 == u2
+                i1.idx == i2.idx && i1.ind.eq_ind_chk(&i2.ind) && u1.equal(u2)
             },
             (&Constr::Case(ref o1), &Constr::Case(ref o2)) => {
                 let (_, ref p1, ref c1, ref bl1) = **o1;
@@ -579,16 +579,84 @@ impl Constr {
     }
 
     /// Universe substitutions
-
-    fn map_constr<F, E>(&self, f: F) -> Result<Constr, E>
-        where F: Fn(&Constr) -> Result<Constr, E>,
+    pub fn subst_instance(&self, subst: &Instance) -> Cow<Constr>
     {
-        self.map_constr_with_binders( |_| Ok(()), |c, _| f(c), &())
-    }
-
-    pub fn subst_instance(&self, _subst: &Instance) -> Cow<Constr>
-    {
-        panic!("Universe substituition is not yet implemented.")
+        if subst.is_empty() { Cow::Borrowed(self) }
+        else {
+            // FIXME: We needlessly allocate in this function even if there were no changes,
+            // due to the signature of map_constr_with_binders (and then waste time deallocating
+            // all the stuff we just built after it's done).  We could get away with not
+            // performing any cloning etc. until we actually change something.
+            fn aux(t: &Constr, pair: &(&Instance, &Cell<bool>)) -> Result<Constr, !> {
+                let (ref subst, ref changed) = *pair;
+                let f = |u| subst.subst_instance(u);
+                match *t {
+                    Constr::Const(ref o) => {
+                        let PUniverses(ref c, ref u) = **o;
+                        return Ok(
+                            if u.is_empty() { t.clone() }
+                            else {
+                                let u_ = f(u);
+                                if &**u_ as *const _ == &**u as *const _ { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    Constr::Const(ORef(Arc::from(PUniverses(c.clone(),
+                                                                            u_.into_owned()))))
+                                }
+                            }
+                        )
+                    },
+                    Constr::Ind(ref o) => {
+                        let PUniverses(ref i, ref u) = **o;
+                        return Ok(
+                            if u.is_empty() { t.clone() }
+                            else {
+                                let u_ = f(u);
+                                if &**u_ as *const _ == &**u as *const _ { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    Constr::Ind(ORef(Arc::from(PUniverses(i.clone(),
+                                                                          u_.into_owned()))))
+                                }
+                            }
+                        )
+                    },
+                    Constr::Construct(ref o) => {
+                        let PUniverses(ref c, ref u) = **o;
+                        return Ok(
+                            if u.is_empty() { t.clone() }
+                            else {
+                                let u_ = f(u);
+                                if &**u_ as *const _ == &**u as *const _ { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    Constr::Construct(ORef(Arc::from(PUniverses(c.clone(),
+                                                                                u_.into_owned()))))
+                                }
+                            }
+                        )
+                    },
+                    Constr::Sort(ref o) => {
+                        if let Sort::Type(ref u) = **o {
+                            return Ok({
+                                let u_ = subst.subst_universe(u);
+                                if &*u_ as *const _ == &**u as *const _ { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    panic!("")
+                                    // Constr::Sort(u_.sort_of())
+                                }
+                            })
+                        }
+                    },
+                    _ => {}
+                }
+                t.map_constr_with_binders( |_| Ok(()), aux, pair)
+            }
+            let changed = Cell::new(false);
+            let Ok(c_) = aux(self, &(subst, &changed));
+            if changed.get() { Cow::Owned(c_) } else { Cow::Borrowed(self) }
+        }
     }
 }
 
@@ -603,7 +671,7 @@ impl Sort {
                     (SortContents::Null, SortContents::Pos) => false,
                 }
             },
-            (&Sort::Type(ref u1), &Sort::Type(ref u2)) => u1 == u2,
+            (&Sort::Type(ref u1), &Sort::Type(ref u2)) => u1.equal(u2),
             (&Sort::Prop(_), &Sort::Type(_)) => false,
             (&Sort::Type(_), &Sort::Prop(_)) => false,
         }
@@ -615,6 +683,6 @@ impl<T> PUniverses<T> {
         where F: Fn(&T, &T) -> bool,
     {
         let PUniverses(ref c1, ref u1) = *self;
-        u1 == u2 && f(c1, c2)
+        u1.equal(u2) && f(c1, c2)
     }
 }

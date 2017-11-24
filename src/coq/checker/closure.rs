@@ -1,5 +1,8 @@
 use coq::checker::environ::{EnvError, Globals};
 use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, Lift, SubsV as Subs};
+use coq::kernel::names::{
+    KnUser,
+};
 use core::convert::{TryFrom};
 use core::nonzero::{NonZero};
 use core::ops::Deref;
@@ -26,6 +29,7 @@ use std::borrow::{Cow};
 use std::cell::{Cell as RustCell};
 use std::collections::{HashMap};
 use std::collections::hash_map;
+use std::hash::{Hash, Hasher};
 use std::mem;
 use std::option::{NoneError};
 use std::sync::{Arc};
@@ -50,8 +54,8 @@ pub type MRef<'b, T> = &'b ORef<T>;
  * constants.
  */
 
-#[derive(Copy,Clone,Debug, Eq, Hash)]
-pub enum TableKey<T> where TableKey<T>: PartialEq {
+#[derive(Copy,Clone,Debug,Hash)]
+pub enum TableKey<T> {
     ConstKey(T),
     // should not occur
     // VarKey(Id),
@@ -336,10 +340,29 @@ impl<'b> PartialEq for TableKeyC<'b> {
             (TableKey::ConstKey(o1), TableKey::ConstKey(o2)) => {
                 let PUniverses(ref c1, ref u1) = **o1;
                 let PUniverses(ref c2, ref u2) = **o2;
-                c1.user_equal(c2) && u1 == u2
+                KnUser(c1) == KnUser(c2) && u1.equal(u2)
             },
             (TableKey::RelKey(i1), TableKey::RelKey(i2)) => i1 == i2,
             (_, _) => false,
+        }
+    }
+}
+
+impl<'b> Eq for TableKeyC<'b>  {}
+
+impl<'b> Hash for TableKeyC<'b> {
+    fn hash<H>(&self, state: &mut H) where H: Hasher {
+        match *self {
+            TableKey::ConstKey(o) => {
+                let PUniverses(ref c, ref u) = **o;
+                state.write_u64(1);
+                KnUser(c).hash(state);
+                u.hash(state);
+            },
+            TableKey::RelKey(i) => {
+                state.write_u64(2);
+                i.hash(state);
+            }
         }
     }
 }
@@ -358,7 +381,7 @@ impl<'id, 'a, 'b, T> Infos<'id, 'b, T> where T: IRepr<'id, 'a, 'b> {
     fn ref_value_cache<'r, 'g>(set: &Set<'id>,
                                rels: &'r mut (u32, VecMap<&'b mut Constr>),
                                tab: &'r mut KeyTable<'b, T>,
-                               globals: &'r mut Globals<'g>, rf: TableKeyC<'b>,
+                               globals: &'r Globals<'g>, rf: TableKeyC<'b>,
                                ctx: Context<'id, 'a, 'b>) -> IdxResult<Option<&'r T>>
             where 'g: 'b
     {
@@ -453,7 +476,7 @@ impl<'id, 'a, 'b, T> Infos<'id, 'b, T> where T: IRepr<'id, 'a, 'b> {
     }
 
     pub fn unfold_reference<'r, 'g>(&'r mut self,
-                                    globals: &'r mut Globals<'g>, rf: TableKeyC<'b>,
+                                    globals: &'r Globals<'g>, rf: TableKeyC<'b>,
                                     ctx: Context<'id, 'a, 'b>) ->
         IdxResult<Option<(&'r mut Set<'id>, &'r T)>>
         where 'g: 'b,
@@ -1060,7 +1083,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
     /// Weak reduction
     /// [whd_val] is for weak head normalization
     /// Note: self must be typechecked beforehand!
-    pub fn whd_val<'r,'g>(self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &mut Globals<'g>,
+    pub fn whd_val<'r,'g>(self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &Globals<'g>,
                           ctx: Context<'id, 'a, 'b>) -> RedResult<Constr>
             where 'g: 'b,
     {
@@ -1864,7 +1887,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
     /// inductive).
     ///
     /// Note: m must be typechecked beforehand!
-    fn knh<'r, 'g>(&mut self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &mut Globals<'g>,
+    fn knh<'r, 'g>(&mut self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &Globals<'g>,
                    m: FConstr<'id, 'a, 'b>,
                    ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
@@ -2018,7 +2041,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
     /// The same for pure terms
     ///
     /// Note: m must be typechecked beforehand!
-    fn knht<'r, 'g>(&mut self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &mut Globals<'g>,
+    fn knht<'r, 'g>(&mut self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &Globals<'g>,
                     env: &Subs<FConstr<'id, 'a, 'b>>, mut t: &'b Constr,
                     ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
@@ -2070,7 +2093,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
     ///
     /// Note: m must be typechecked beforehand!
     pub fn knr<'r, 'g>(&mut self, info: &'r mut ClosInfos<'id, 'a, 'b>,
-                       globals: &'r mut Globals<'g>,
+                       globals: &'r Globals<'g>,
                        mut m: FConstr<'id, 'a, 'b>,
                        ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
@@ -2217,7 +2240,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
     ///
     /// Note: m must be typechecked beforehand!
     pub fn kni<'r, 'g>(&'r mut self, info: &mut ClosInfos<'id, 'a, 'b>,
-                       globals: &'r mut Globals<'g>,
+                       globals: &'r Globals<'g>,
                        m: FConstr<'id, 'a, 'b>,
                        ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
@@ -2226,7 +2249,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
         self.knr(info, globals, hm, ctx, i, s)
     }
 
-    fn kh<'r, 'g>(&mut self, info: &'r mut ClosInfos<'id, 'a, 'b>, globals: &'r mut Globals<'g>,
+    fn kh<'r, 'g>(&mut self, info: &'r mut ClosInfos<'id, 'a, 'b>, globals: &'r Globals<'g>,
                   v: FConstr<'id, 'a, 'b>,
                   ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
@@ -2240,7 +2263,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
     /// stops whenever a reduction is blocked.
     /// Note: v must be typechecked beforehand!
     pub fn whd_stack<'r, 'g>(&mut self, info: &'r mut ClosInfos<'id, 'a, 'b>,
-                             globals: &'r mut Globals<'g>,
+                             globals: &'r Globals<'g>,
                              v: FConstr<'id, 'a, 'b>,
                              ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,

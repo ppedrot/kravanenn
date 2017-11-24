@@ -3,7 +3,9 @@ use coq::checker::univ::{
 };
 use coq::kernel::names::{
     CMapEnv,
+    KnKey,
     KnMap,
+    KnUser,
     MindMapEnv,
     // MpMap,
     MutInd,
@@ -31,9 +33,9 @@ use std::borrow::Cow;
 
 #[derive(Default)]
 pub struct Globals<'g> {
-    constants: CMapEnv<&'g Cb>,
+    constants: CMapEnv<'g, &'g Cb>,
     inductives: MindMapEnv<'g, &'g IndPack>,
-    inductives_eq: KnMap<Kn>,
+    inductives_eq: KnMap<'g, Kn>,
     // modules: MpMap<Module>,
     // modtypes: MpMap<ModType>,
 }
@@ -77,7 +79,7 @@ impl<'g> Globals<'g> where {
 
     /// Global constants
     pub fn lookup_constant(&self, c: &Cst) -> Option<&'g Cb> {
-        self.constants.get(c).map( |&cb| cb )
+        self.constants.get(&KnUser(c)).map( |&cb| cb )
     }
 
     pub fn constant_value(&self, o: &PUniverses<Cst>) ->
@@ -86,15 +88,6 @@ impl<'g> Globals<'g> where {
         let PUniverses(ref kn, ref u) = *o;
         self.lookup_constant(kn)
             .and_then( |cb| {
-                // NB: I think there's a way to solve this problem without using take_mut (or
-                // RefCell, which we are trying to avoid altogether), but it would be worse in
-                // most ways except that it doesn't abort on panic, which I don't care about
-                // The method involves storing a dummy &'g Cb in the Env structure and would
-                // probably result in a somewhat annoying interface (more importantly, it would
-                // still probably result in incorrect results if a panic was caught while the
-                // HashMap was still alive, though if people are actually paying attention to
-                // UnwindSafe, this should not be a problem).
-                // Gory details available on request.
                 Some(match cb.body {
                     CstDef::Def(ref l_body) => {
                         // l_body is lazily initialized, and this is the only place that tries to
@@ -136,17 +129,17 @@ impl<'g> Globals<'g> where {
 
     /// Mutual Inductives
     fn scrape_mind<'a>(&'a self, kn: &'a Kn) -> &'a Kn {
-        self.inductives_eq.get(kn).unwrap_or(kn)
+        self.inductives_eq.get(&KnKey(kn)).unwrap_or(kn)
     }
 
     pub fn mind_equiv(&self, ind1: &Ind, ind2: &Ind) -> bool {
         ind1.pos == ind2.pos &&
-        self.scrape_mind(ind1.name.user()) == self.scrape_mind(ind2.name.user())
+        self.scrape_mind(ind1.name.user()).equal(self.scrape_mind(ind2.name.user()))
     }
 
     pub fn lookup_mind(&self, kn: &MutInd) -> Option<&'g IndPack>
     {
-        self.inductives.get(kn).map( |&v| v )
+        self.inductives.get(&KnUser(kn)).map( |&v| v )
     }
 }
 
