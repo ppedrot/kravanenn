@@ -15,7 +15,7 @@ extern crate core;
 extern crate cuckoo;
 extern crate lazy_init;
 extern crate movecell;
-// extern crate rayon;
+extern crate rayon;
 extern crate smallvec;
 extern crate take_mut;
 extern crate typed_arena;
