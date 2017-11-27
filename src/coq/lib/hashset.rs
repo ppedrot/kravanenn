@@ -8,7 +8,7 @@ pub mod combine {
     const BETA : i64 = 7;
 
     pub const fn combine(x: i64, y: i64) -> i64 {
-        // FIXME: Handle overflow.
+        // FIXME: Handle overflow.  Actually, does it even matter here?
         x * ALPHA + y
     }
 
@@ -25,7 +25,7 @@ pub mod combine {
     }
 
     pub const fn combinesmall(x: i64, y: i64) -> i64 {
-        // FIXME: Handle overflow.
+        // FIXME: Handle overflow.  Actually, does it even matter here?
         BETA * x + y
     }
 }

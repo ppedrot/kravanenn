@@ -1,3 +1,7 @@
+use coq::checker::univ::{
+    Huniv,
+    SubstResult,
+};
 use coq::kernel::esubst::{Idx, IdxError, Lift, IdxResult};
 use core::convert::TryFrom;
 use core::nonzero::NonZero;
@@ -16,6 +20,7 @@ use ocaml::values::{
     RDecl,
     Sort,
     SortContents,
+    Univ,
 };
 use std::borrow::{Cow};
 use std::cell::Cell;
@@ -69,6 +74,14 @@ impl<'a> Substituend<&'a Constr> {
                 self.lift(depth)
             },
         }
+    }
+}
+
+impl Univ {
+    fn sort_of(&self) -> Sort {
+        if self.is_type0m() { Sort::Prop(SortContents::Null) }
+        else if self.is_type0() { Sort::Prop(SortContents::Pos) }
+        else { Sort::Type(ORef(Arc::new(self.clone()))) }
     }
 }
 
@@ -579,16 +592,16 @@ impl Constr {
     }
 
     /// Universe substitutions
-    pub fn subst_instance(&self, subst: &Instance) -> Cow<Constr>
+    pub fn subst_instance(&self, subst: &Instance, tbl: &Huniv) -> SubstResult<Cow<Constr>>
     {
-        if subst.is_empty() { Cow::Borrowed(self) }
+        if subst.is_empty() { Ok(Cow::Borrowed(self)) }
         else {
             // FIXME: We needlessly allocate in this function even if there were no changes,
             // due to the signature of map_constr_with_binders (and then waste time deallocating
             // all the stuff we just built after it's done).  We could get away with not
             // performing any cloning etc. until we actually change something.
-            fn aux(t: &Constr, pair: &(&Instance, &Cell<bool>)) -> Result<Constr, !> {
-                let (ref subst, ref changed) = *pair;
+            fn aux(t: &Constr, env: &(&Instance, &Huniv, &Cell<bool>)) -> SubstResult<Constr> {
+                let (subst, tbl, ref changed) = *env;
                 let f = |u| subst.subst_instance(u);
                 match *t {
                     Constr::Const(ref o) => {
@@ -596,12 +609,12 @@ impl Constr {
                         return Ok(
                             if u.is_empty() { t.clone() }
                             else {
-                                let u_ = f(u);
-                                if &**u_ as *const _ == &**u as *const _ { t.clone() }
+                                let u_ = f(u)?;
+                                if &**u_ as *const _ == &***u as *const _ { t.clone() }
                                 else {
                                     changed.set(true);
                                     Constr::Const(ORef(Arc::from(PUniverses(c.clone(),
-                                                                            u_.into_owned()))))
+                                                                            u_))))
                                 }
                             }
                         )
@@ -611,12 +624,12 @@ impl Constr {
                         return Ok(
                             if u.is_empty() { t.clone() }
                             else {
-                                let u_ = f(u);
-                                if &**u_ as *const _ == &**u as *const _ { t.clone() }
+                                let u_ = f(u)?;
+                                if &**u_ as *const _ == &***u as *const _ { t.clone() }
                                 else {
                                     changed.set(true);
                                     Constr::Ind(ORef(Arc::from(PUniverses(i.clone(),
-                                                                          u_.into_owned()))))
+                                                                          u_))))
                                 }
                             }
                         )
@@ -626,12 +639,12 @@ impl Constr {
                         return Ok(
                             if u.is_empty() { t.clone() }
                             else {
-                                let u_ = f(u);
-                                if &**u_ as *const _ == &**u as *const _ { t.clone() }
+                                let u_ = f(u)?;
+                                if &**u_ as *const _ == &***u as *const _ { t.clone() }
                                 else {
                                     changed.set(true);
                                     Constr::Construct(ORef(Arc::from(PUniverses(c.clone(),
-                                                                                u_.into_owned()))))
+                                                                                u_))))
                                 }
                             }
                         )
@@ -639,23 +652,22 @@ impl Constr {
                     Constr::Sort(ref o) => {
                         if let Sort::Type(ref u) = **o {
                             return Ok({
-                                let u_ = subst.subst_universe(u);
-                                if &*u_ as *const _ == &**u as *const _ { t.clone() }
+                                let u_ = subst.subst_universe(u, tbl)?;
+                                if u_.hequal(u) { t.clone() }
                                 else {
                                     changed.set(true);
-                                    panic!("")
-                                    // Constr::Sort(u_.sort_of())
+                                    Constr::Sort(ORef(Arc::new(u_.sort_of())))
                                 }
                             })
                         }
                     },
                     _ => {}
                 }
-                t.map_constr_with_binders( |_| Ok(()), aux, pair)
+                t.map_constr_with_binders( |_| Ok(()), aux, env)
             }
             let changed = Cell::new(false);
-            let Ok(c_) = aux(self, &(subst, &changed));
-            if changed.get() { Cow::Owned(c_) } else { Cow::Borrowed(self) }
+            let c_ = aux(self, &(subst, tbl, &changed))?;
+            Ok(if changed.get() { Cow::Owned(c_) } else { Cow::Borrowed(self) })
         }
     }
 }

@@ -179,12 +179,20 @@ pub enum RawLevel {
     Prop,
     Set,
     Var(Int),
-    Level(Int, #[serde(deserialize_state)] ORef<Dp>),
+    /// Observation: Dp = List<Id> is the same size as ORef<List<Id>>.
+    /// The only reason to keep it indirect would be for hashconsing, but we can instead hashcons
+    /// the list entries to which it points (presumably, these preserve any sharing the Dps did,
+    /// plus Hlists are hashconsed themselves).
+    ///
+    /// Moreover, as long as we don't create any new Dps in the checker, we don't even need to
+    /// hashcons them ourselves...
+    Level(Int, #[serde(deserialize_state)] Dp),
 }
 
 #[derive(Debug, Clone,DeserializeState)]
 #[serde(deserialize_state = "Seed<'de>")]
 pub struct Level {
+    /// We will skip remembering the hash here, since we won't be hashing Levels anymore.
     pub hash: Int,
     #[serde(deserialize_state)] pub data: RawLevel,
 }

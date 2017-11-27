@@ -25,7 +25,8 @@ use ocaml::values::{
     RDecl,
     RecordBody,
 };
-use std::borrow::{Cow};
+use std::borrow::{Cow as RustCow};
+use util::borrow::{Cow};
 use std::cell::{Cell as RustCell};
 use std::collections::{HashMap};
 use std::collections::hash_map;
@@ -38,6 +39,10 @@ use util::ghost_cell::{Cell, Set};
 use vec_map::{self, VecMap};
 
 pub type MRef<'b, T> = &'b ORef<T>;
+
+/// A dumbed-down version of Cow that has no requirements on its type parameter.
+/// Used for implementig the immutable version of zip.
+type SCow<'b, T> = Cow<'b, T, T>;
 
 /*
  * Five kinds of reductions:
@@ -241,13 +246,6 @@ pub enum StackMember<'id, 'a, 'b, Inst, Shft> where 'b: 'a, 'id: 'a {
     Update(&'a FConstr<'id, 'a, 'b>, Inst),
 }
 
-/// A dumbed-down version of Cow that has no requirements on its type parameter.
-/// Used for implementig the immutable version of zip.
-enum SCow<'a, B> where B: 'a {
-    Borrowed(&'a B),
-    Owned(B),
-}
-
 /// A [stack] is a context of arguments, arguments are pushed by
 /// [append_stack] one array at a time but popped with [decomp_stack]
 /// one by one
@@ -322,8 +320,8 @@ impl<'a, B> Deref for SCow<'a, B>
 
     fn deref(&self) -> &B {
         match *self {
-            SCow::Borrowed(borrowed) => borrowed,
-            SCow::Owned(ref owned) => owned,
+            Cow::Borrowed(borrowed) => borrowed,
+            Cow::Owned(ref owned) => owned,
         }
     }
 }
@@ -450,8 +448,8 @@ impl<'id, 'a, 'b, T> Infos<'id, 'b, T> where T: IRepr<'id, 'a, 'b> {
                     TableKey::ConstKey(cst) => {
                         if let Some(Ok(body)) = globals.constant_value(cst) {
                             let body = match body {
-                                Cow::Borrowed(b) => b,
-                                Cow::Owned(b) => {
+                                RustCow::Borrowed(b) => b,
+                                RustCow::Owned(b) => {
                                     // Sometimes we get an owned value back (due to, e.g., universe
                                     // polymorphism), so we need to allocate it in our constr arena.
                                     // This is very unfortunate, but I'm not sure I see a good way
@@ -607,7 +605,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
         // that doesn't require mutual recursion.
         /* let mut norm_ = self.norm.get();
         let mut term_ = Cow::Borrowed(self.fterm().expect("Tried to lift a locked term!"));*/
-        let mut lfts = Cow::Borrowed(lfts);
+        let mut lfts = RustCow::Borrowed(lfts);
         let mut v = self;
         loop {
             match *v.fterm(set).expect("Tried to lift a locked term!") {
@@ -827,7 +825,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                     // expensive
                     let mut lfts_ = lfts.into_owned();
                     lfts_.shift(k)?;
-                    lfts = Cow::Owned(lfts_);
+                    lfts = RustCow::Owned(lfts_);
                     // norm_ = a.norm.get();
                     // term_ = Cow::Borrowed(a.fterm().expect("Tried to lift a locked term!"));
                     v = a;
@@ -859,7 +857,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
             StackMember::App(args) => {
                 let norm = set.get(&m.norm).neutr();
                 let t = FTerm::App(m.clone(set), args);
-                Ok(SCow::Owned(FConstr {
+                Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
                 }))
@@ -867,7 +865,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
             StackMember::Case(o, p, br, _) => {
                 let norm = set.get(&m.norm).neutr();
                 let t = FTerm::Case(o, p, m.clone(set), br);
-                Ok(SCow::Owned(FConstr {
+                Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
                 }))
@@ -875,7 +873,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
             StackMember::CaseT(o, e, _) => {
                 let norm = set.get(&m.norm).neutr();
                 let t = FTerm::CaseT(o, m.clone(set), e);
-                Ok(SCow::Owned(FConstr {
+                Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
                 }))
@@ -883,7 +881,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
             StackMember::Proj(_, _, p, b, _) => {
                 let norm = set.get(&m.norm).neutr();
                 let t = FTerm::Proj(p, b, m.clone(set));
-                Ok(SCow::Owned(FConstr {
+                Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
                 }))
@@ -892,10 +890,10 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                 // FIXME: This seems like a very weird and convoluted way to do this.
                 let mut v = vec![m.clone(set)];
                 f(set, v, par);
-                Ok(SCow::Owned(fx))
+                Ok(Cow::Owned(fx))
             },
             StackMember::Shift(n, _) => {
-                Ok(SCow::Owned(m.lft(set, n, ctx)?))
+                Ok(Cow::Owned(m.lft(set, n, ctx)?))
             },
             StackMember::Update(rf, _) => {
                 let norm = *set.get(&m.norm);
@@ -915,7 +913,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
     /// this only matters in one place (whd_stack)--see below.
     fn zip_mut<I, S>(&self, set: &mut Set<'id>, stk: &mut Stack<'id, 'a, 'b, I, S>,
                      ctx: Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>> {
-        let mut m = SCow::Borrowed(self);
+        let mut m = Cow::Borrowed(self);
         while let Some(s) = stk.pop() {
             m = Self::zip_item_mut(m, set, s, ctx, |_, v, par| {
                 stk.append(v);
@@ -944,9 +942,9 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
     fn zip<I, S>(&self, set: &mut Set<'id>, stk: &Stack<'id, 'a, 'b, I, S>,
                  ctx: Context<'id, 'a, 'b>) -> IdxResult<()> {
         let stk = stk.iter();
-        let mut bstk = Vec::new(); // the stack, m, and s outlive bstk
-        let mut m = SCow::Borrowed(self); // the stack and s outlive m
-        // We use a Vec of SCows of StackMembers rather than a normal stack.  The reason is that
+        let mut bstk: Vec<SCow<_>> = Vec::new(); // the stack, m, and s outlive bstk
+        let mut m = Cow::Borrowed(self); // the stack and s outlive m
+        // We use a Vec of Cows of StackMembers rather than a normal stack.  The reason is that
         // normal stacks own their items, and some operations (like append) require mutability
         // in order to function.  Rather than write a specialized version of Stack that works
         // within these restrictions, we just use the Vec directly and inline specialized versions
@@ -956,22 +954,22 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
         // the stack again, and not being allowed to clone stacks normally is a nice lint, but
         // that honestly might be less work; maybe we should just do that instead.
         //
-        // Also note that we use SCow over regular Cow because regular Cow requires there to be an
+        // Also note that we use Cow over regular Cow because regular Cow requires there to be an
         // easy way to turn an immutable version into an owned one, which we don't actually have in
         // general (we only sort of provide an implementation for Apps).
         for s_ in stk {
-            let mut s_ = SCow::Borrowed(s_);
+            let mut s_ = Cow::Borrowed(s_);
             loop {
                 // Manual copy of append designed for our weird Cow stacks.
                 let append = |set: &Set<'id>, bstk: &mut Vec<_>, mut v: Vec<_>| {
                     if let Some(o) = bstk.last_mut() {
                         match *o {
-                            SCow::Borrowed(&StackMember::App(ref l)) => {
+                            Cow::Borrowed(&StackMember::App(ref l)) => {
                                 v.extend(l.iter().map( |v| v.clone(set) ));
-                                *o = SCow::Owned(StackMember::App(v));
+                                *o = Cow::Owned(StackMember::App(v));
                                 return;
                             },
-                            SCow::Owned(StackMember::App(ref mut l)) => {
+                            Cow::Owned(StackMember::App(ref mut l)) => {
                                 mem::swap(&mut v, l);
                                 l.extend(v.into_iter());
                                 return;
@@ -979,12 +977,12 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                             _ => {},
                         }
                     }
-                    bstk.push(SCow::Owned(StackMember::App(v)))
+                    bstk.push(Cow::Owned(StackMember::App(v)))
                 };
                 // First, check whether we can get away (almost) with the mutable case.
                 let s = match s_ {
-                    SCow::Borrowed(s) => s,
-                    SCow::Owned(s) => {
+                    Cow::Borrowed(s) => s,
+                    Cow::Owned(s) => {
                         // In the owned case, we can just treat this like we do for regular mutable
                         // stacks, except for the append case (which needs to be different to deal
                         // with our weird Cow stack).  Actually, the append case is the only case
@@ -997,7 +995,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                             // stack is actually at the end of the Vec.  Therefore, where in the
                             // OCaml we perform par @ stk, here we have reversed par and reversed
                             // stk, and perform stk ++ par (or kst ++ rap).
-                            bstk.extend(par.0.into_iter().map(SCow::Owned));
+                            bstk.extend(par.0.into_iter().map(Cow::Owned));
                         })?;
                         // Continue the loop only if we added some elements to the head of the
                         // stack (a fixpoint does this).
@@ -1010,7 +1008,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                     StackMember::App(ref args) => {
                         let norm = set.get(&m.norm).neutr();
                         let t = FTerm::App(m.clone(set), clone_vec(args, set) /* expensive */);
-                        m = SCow::Owned(FConstr {
+                        m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
                         });
@@ -1019,7 +1017,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                         let norm = set.get(&m.norm).neutr();
                         let t = FTerm::Case(o, p.clone(set), m.clone(set),
                                             clone_vec(br, set) /* expensive */);
-                        m = SCow::Owned(FConstr {
+                        m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
                         });
@@ -1027,7 +1025,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                     StackMember::CaseT(o, ref e, _) => {
                         let norm = set.get(&m.norm).neutr();
                         let t = FTerm::CaseT(o, m.clone(set), e.clone(set) /* expensive */);
-                        m = SCow::Owned(FConstr {
+                        m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
                         });
@@ -1035,7 +1033,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                     StackMember::Proj(_, _, p, ref b, _) => {
                         let norm = set.get(&m.norm).neutr();
                         let t = FTerm::Proj(p, b.clone(), m.clone(set));
-                        m = SCow::Owned(FConstr {
+                        m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
                         });
@@ -1043,17 +1041,17 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                     StackMember::Fix(ref fx, ref par, _) => {
                         // FIXME: This seems like a very weird and convoluted way to do this.
                         let mut v = vec![m.clone(set)];
-                        m = SCow::Borrowed(fx);
+                        m = Cow::Borrowed(fx);
                         append(set, &mut bstk, v);
                         // mem::swap(stk, &mut par);
                         // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
                         // actually at the end of the Vec.  Therefore, where in the OCaml we
                         // perform par @ stk, here we have reversed par and reversed stk, and
                         // perform stk ++ par (or kst ++ rap).
-                        bstk.extend(par.0.iter().map(SCow::Borrowed));
+                        bstk.extend(par.0.iter().map(Cow::Borrowed));
                     },
                     StackMember::Shift(n, _) => {
-                        m = SCow::Owned(m.lft(set, n, ctx)?);
+                        m = Cow::Owned(m.lft(set, n, ctx)?);
                     },
                     StackMember::Update(ref rf, _) => {
                         let norm = *set.get(&m.norm);
@@ -1061,7 +1059,7 @@ impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
                         rf.update(set, norm, term);
                         // TODO: The below is closer to the OCaml implementation, but it doesn't
                         // seem like there's any point in doing it, since we never update m anyway.
-                        // m = SCow::Borrowed(rf);
+                        // m = Cow::Borrowed(rf);
                     },
                 }
                 // Continue the loop only if we added some elements to the head of the stack (a
@@ -1892,15 +1890,15 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                    ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
     {
-        let mut m: SCow<'a, FConstr<'id, 'a, 'b>> = SCow::Owned(m);
+        let mut m: SCow<'a, FConstr<'id, 'a, 'b>> = Cow::Owned(m);
         loop {
             match *m.fterm(&info.set).expect("Tried to lift a locked term") {
                 FTerm::Lift(k, ref a) => {
                     self.shift(k, s.clone())?;
-                    m = SCow::Borrowed(a);
+                    m = Cow::Borrowed(a);
                 },
                 FTerm::Clos(mut t, ref e) => {
-                    if let SCow::Borrowed(m) = m {
+                    if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
                         self.update(&mut info.set, m, i.clone(), ctx)?;
@@ -1924,7 +1922,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                             Constr::Fix(_) => { // laziness
                                 // FIXME: Are we creating a term here and then immediately
                                 // destroying it?
-                                m = SCow::Owned(e.mk_clos2(&info.set, t, ctx)?);
+                                m = Cow::Owned(e.mk_clos2(&info.set, t, ctx)?);
                                 break; // knh
                             },
                             Constr::Cast(ref o) => {
@@ -1934,13 +1932,13 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                             Constr::Rel(n) => {
                                 // TODO: Might know n is NonZero if it's been typechecked?
                                 let n = Idx::new(NonZero::new(n).ok_or(IdxError::from(NoneError))?)?;
-                                m = SCow::Owned(e.clos_rel(&info.set, n, ctx)?);
+                                m = Cow::Owned(e.clos_rel(&info.set, n, ctx)?);
                                 break; // knh
                             },
                             Constr::Proj(_) => { // laziness
                                 // FIXME: Are we creating a term here and then immediately
                                 // destroying it?
-                                m = SCow::Owned(e.mk_clos2(&info.set, t, ctx)?);
+                                m = Cow::Owned(e.mk_clos2(&info.set, t, ctx)?);
                                 break; // knh
                             },
                             Constr::Lambda(_) | Constr::Prod(_) | Constr::Construct(_) |
@@ -1952,16 +1950,16 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                     }
                 },
                 FTerm::App(ref a, ref b) => {
-                    if let SCow::Borrowed(m) = m {
+                    if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
                         self.update(&mut info.set, m, i.clone(), ctx)?;
                     }
                     self.append(clone_vec(b, &info.set) /* expensive */);
-                    m = SCow::Borrowed(a);
+                    m = Cow::Borrowed(a);
                 },
                 FTerm::Case(o, ref p, ref t, ref br) => {
-                    if let SCow::Borrowed(m) = m {
+                    if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
                         self.update(&mut info.set, m, i.clone(), ctx)?;
@@ -1969,17 +1967,17 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                     self.push(StackMember::Case(o, p.clone(&info.set),
                                                 clone_vec(br, &info.set) /* expensive */,
                                                 i.clone()));
-                    m = SCow::Borrowed(t);
+                    m = Cow::Borrowed(t);
                 },
                 FTerm::CaseT(o, ref t, ref env) => {
-                    if let SCow::Borrowed(m) = m {
+                    if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
                         self.update(&mut info.set, m, i.clone(), ctx)?;
                     }
                     self.push(StackMember::CaseT(o, env.clone(&info.set) /* expensive */,
                                                  i.clone()));
-                    m = SCow::Borrowed(t);
+                    m = Cow::Borrowed(t);
                 },
                 FTerm::Fix(o, n, _) => {
                     let Fix(Fix2(ref ri, _), _) = **o;
@@ -1995,13 +1993,13 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                     match self.get_nth_arg(&mut info.set, m__, n, ctx)? {
                         Some((pars, arg)) => {
                             self.push(StackMember::Fix(m_, pars, i.clone()));
-                            m = SCow::Owned(arg);
+                            m = Cow::Owned(arg);
                         },
                         None => return Ok(m_),
                     }
                 },
                 FTerm::Cast(ref t, _, _) => {
-                    m = SCow::Borrowed(t);
+                    m = Cow::Borrowed(t);
                 },
                 FTerm::Proj(p, b, ref c) => {
                     // DELTA
@@ -2013,7 +2011,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                         // not finding a projection.  I'm open to changing this!
                         let pb = globals.lookup_projection(p)
                                         .ok_or(RedError::NotFound)??;
-                        if let SCow::Borrowed(m) = m {
+                        if let Cow::Borrowed(m) = m {
                             // NOTE: We probably only want to bother updating this reference if
                             // it's shared, right?
                             self.update(&mut info.set, m, i.clone(), ctx)?;
@@ -2023,7 +2021,7 @@ impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
                         let npars = usize::try_from(pb.npars).map_err(IdxError::from)?;
                         let arg = usize::try_from(pb.arg).map_err(IdxError::from)?;
                         self.push(StackMember::Proj(npars, arg, p, b, i.clone()));
-                        m = SCow::Borrowed(c);
+                        m = Cow::Borrowed(c);
                     } else {
                         return Ok(m.clone(&info.set))
                     }

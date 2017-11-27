@@ -1,4 +1,6 @@
 use coq::checker::univ::{
+    Huniv,
+    SubstError,
     Universes,
 };
 use coq::kernel::names::{
@@ -36,6 +38,8 @@ pub struct Globals<'g> {
     constants: CMapEnv<'g, &'g Cb>,
     inductives: MindMapEnv<'g, &'g IndPack>,
     inductives_eq: KnMap<'g, Kn>,
+    /// Hash-consed universe table.
+    univ_hcons_tbl: Huniv,
     // modules: MpMap<Module>,
     // modtypes: MpMap<ModType>,
 }
@@ -64,6 +68,7 @@ pub struct Env<'b, 'g> where 'g: 'b {
 pub enum ConstEvaluationResult {
     NoBody,
     Opaque,
+    Subst(SubstError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,6 +78,12 @@ pub enum EnvError {
 }
 
 pub type EnvResult<T> = Result<T, EnvError>;
+
+impl ::std::convert::From<SubstError> for ConstEvaluationResult {
+    fn from(e: SubstError) -> Self {
+        ConstEvaluationResult::Subst(e)
+    }
+}
 
 impl<'g> Globals<'g> where {
     /// Constants
@@ -101,7 +112,10 @@ impl<'g> Globals<'g> where {
                             l_body.value
                         });
                         if cb.polymorphic {
-                            Ok(b.subst_instance(u))
+                            match b.subst_instance(u, &self.univ_hcons_tbl) {
+                                Ok(b) => Ok(b),
+                                Err(e) => Err(ConstEvaluationResult::Subst(e)),
+                            }
                         } else {
                             Ok(Cow::Borrowed(&**b))
                         }

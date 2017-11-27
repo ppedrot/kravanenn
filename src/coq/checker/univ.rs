@@ -1,8 +1,10 @@
-use coq::kernel::names::{
-    HDp,
+use coq::kernel::esubst::{
+    IdxError,
+    IdxResult,
 };
-use coq::lib::hashcons::{Table, HashconsedType};
+use coq::lib::hashcons::{HashconsedType, Hlist, Hstring, Table};
 use coq::lib::hashset::combine;
+use core::convert::TryFrom;
 use ocaml::de::{
     ORef,
 };
@@ -15,8 +17,9 @@ use ocaml::values::{
     RawLevel,
     Univ,
 };
-use std::borrow::{Cow};
+use std::cmp::{Ord, Ordering};
 use std::collections::HashMap;
+use std::option::{NoneError};
 use std::sync::{Arc};
 
 /// Comparison on this type is pointer equality
@@ -52,63 +55,61 @@ pub enum UnivError {
     Anomaly(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubstError {
+    NotFound,
+    Idx(IdxError),
+}
+
 // type LMap<T> = HashMap<Level, T>;
 
 type UMap<T> = HashMap<Level, T>;
 
-pub type Hlevel = Table<Level, HDp>;
+type Hexpr = ();
 
-pub type Hexpr = Table<Expr, Hlevel>;
+pub type Helem<T, U> = Table<ORef<(T, Int, HList<T>)>, U>;
 
-pub type Huniv = Table<Univ, Hexpr>;
+pub type Huniv = Helem<Expr, ()>;
 
 pub type UnivResult<T> = Result<T, UnivError>;
 
+pub type SubstResult<T> = Result<T, SubstError>;
+
 pub trait Hashconsed<U> {
-    fn hash(&self) -> i64;
+    fn hash(&self) -> IdxResult<i64>;
     fn eq(&self, &Self) -> bool;
-    fn hcons<'a>(&'a self, &'a U) -> Cow<'a, Self>
+    fn hcons<'a>(self, &'a U) -> Self
         where Self: ToOwned;
 }
 
-impl<T, U> HashconsedType<U> for HList<T>
+impl ::std::convert::From<IdxError> for SubstError {
+    fn from(e: IdxError) -> Self {
+        SubstError::Idx(e)
+    }
+}
+
+impl<T, U> HashconsedType<U> for ORef<(T, Int, HList<T>)>
     where
         T: Hashconsed<U>,
         T: Clone,
 {
     fn hash(&self) -> i64 {
-        match *self {
-            HList::Nil => 0,
-            HList::Cons(ref o) => {
-                let (_, h, _) = **o;
-                h
-            },
-        }
+        let (_, h, _) = **self;
+        h
     }
 
-    fn eq(&self, l2: &Self) -> bool {
-        match (self, l2) {
-            (&HList::Nil, &HList::Nil) => true,
-            (&HList::Cons(ref o1), &HList::Cons(ref o2)) => {
-                let (ref x1, _, ref l1) = **o1;
-                let (ref x2, _, ref l2) = **o2;
-                x1 as *const _ == x2 as *const _ && &*l1 as *const _ == &*l2 as *const _
-            },
-            (_, _) => false,
-        }
+    fn eq(&self, o2: &Self) -> bool {
+        let (ref x1, _, ref l1) = **self;
+        let (ref x2, _, ref l2) = **o2;
+        x1.eq(x2) && l1.hequal(l2)
     }
 
-    fn hashcons<'a, 'b>(&'b self, u: &'a U) -> Cow<'b, Self>
+    fn hashcons(self, u: &U) -> Self
     {
         // FIXME: Should these terms be new each time, or should we try to get more sharing?
-        match *self {
-            HList::Nil => Cow::Owned(HList::Nil),
-            HList::Cons(ref o) => {
-                let (ref x, h, ref l) = **o;
-                let x = x.hcons(u);
-                Cow::Owned(HList::Cons(ORef(Arc::new((x.into_owned(), h, l.to_owned())))))
-            },
-        }
+        let (ref x, h, ref l) = *self;
+        let x = x.to_owned().hcons(u);
+        ORef(Arc::new((x, h, l.to_owned())))
     }
 }
 
@@ -122,57 +123,73 @@ impl<T> HList<T>
             HList::Cons(ref o) => {
                 let (_, h, _) = **o;
                 h
-            },
+            }
         }
     }
 
-    /* fn hashcons<F>(&self, hc: F) -> Cow<Self>
-        where
-            F: Fn(&T) -> Cow<T>,
-            T: Clone,
-    {
-        match *self {
-            HList::Nil => Cow::Borrowed(self),
-            HList::Cons(ref o) => {
-                let (ref x, h, ref l) = **o;
-                match self.hc(l) {
-                    Cow::Owned(x) => Cow::Owned(HList::Cons(x, h, l.to_owned())),
-                    Cow::Borrowed(x) => Cow::Borrowed(self),
-                }
-             },
+    pub fn hequal(&self, l2: &Self) -> bool {
+        // Works assuming all HLists are already hconsed.
+        match (self, l2) {
+            (&HList::Nil, &HList::Nil) => true,
+            (&HList::Cons(ref o1), &HList::Cons(ref o2)) => &**o1 as *const _ == &**o2 as *const _,
+            (_, _) => false,
         }
-    } */
+    }
 
     /// No recursive call: the interface guarantees that all HLists from this
     /// program are already hashconsed. If we get some external HList, we can
     /// still reconstruct it by traversing it entirely.
-    fn hcons<'a, U>(&'a self, u: &'a Table<HList<T>, U>) -> Cow<'a, Self>
+    fn hcons<'a, U>(self, u: &'a Helem<T, U>) -> Self
         where
             T: Hashconsed<U>,
             T: Clone,
     {
-        u.hcons(self)
+        match self {
+            HList::Nil => HList::Nil,
+            HList::Cons(o) => HList::Cons(u.hcons(o)),
+        }
     }
 
     fn nil() -> Self {
         HList::Nil
     }
 
-    fn cons<'a, U>(x: T, l: Self, u: &'a Table<HList<T>, U>) -> Self
+    fn cons<'a, U>(x: T, l: Self, u: &'a Helem<T, U>) -> IdxResult<Self>
         where
             T: Hashconsed<U>,
             T: Clone,
     {
-        let h = x.hash();
-        let hl = match l {
-            HList::Nil => 0,
-            HList::Cons(ref o) => {
-                let (_, h, _) = **o;
-                h
-            },
-        };
+        let h = x.hash()?;
+        let hl = l.hash();
         let h = combine::combine(h, hl);
-        HList::Cons(ORef(Arc::new((x, h, l)))).hcons(u).into_owned()
+        Ok(HList::Cons(ORef(Arc::new((x, h, l)))).hcons(u))
+    }
+
+    pub fn map<'a, U, F, E>(&self, mut f: F, u: &'a Helem<T, U>) -> Result<Self, E>
+        where
+            E: From<IdxError>,
+            F: FnMut(&T) -> Result<T, E>,
+            T: Hashconsed<U>,
+            T: Clone,
+    {
+        match *self {
+            HList::Nil => Ok(HList::nil()),
+            HList::Cons(ref o) => {
+                let (ref x, _, ref l) = **o;
+                Ok(Self::cons(f(x)?, l.map(f, u)?, u)?)
+            }
+        }
+    }
+
+    /// Apriori hashconsing ensures that the map is equal to its argument
+    pub fn smart_map<'a, U, F, E>(&self, f: F, u: &'a Helem<T, U>) -> Result<Self, E>
+        where
+            E: From<IdxError>,
+            F: FnMut(&T) -> Result<T, E>,
+            T: Hashconsed<U>,
+            T: Clone,
+    {
+        self.map(f, u)
     }
 
     fn for_all2<F>(&self, l2: &Self, f: F) -> bool
@@ -189,77 +206,54 @@ impl<T> HList<T>
             }
         }
     }
-    /* let nil = Nil
-  let cons x l =
-    let h = M.hash x in
-    let hl = match l with Nil -> 0 | Cons (_, h, _) -> h in
-    let h = Hashset.Combine.combine h hl in
-    hcons (Cons (x, h, l))*/
-    /*fn cons(&self, x: &T, l: &Self) -> Cow<Self> {
-        let h = Expr.HExpr
-        match *self {
-            l
-        }
-  let cons x l =
-    let h = M.hash x in
-    let hl = match l with Nil -> 0 | Cons (_, h, _) -> h in
-    let h = Hashset.Combine.combine h hl in
-    hcons (Cons (x, h, l))
-    }
-
-  let hcons = Hashcons.simple_hcons Hcons.generate Hcons.hcons M.hcons
-  (** No recursive call: the interface guarantees that all HLists from this
-      program are already hashconsed. If we get some external HList, we can
-      still reconstruct it by traversing it entirely. *)
-  let nil = Nil
-  let cons x l =
-    let h = M.hash x in
-    let hl = match l with Nil -> 0 | Cons (_, h, _) -> h in
-    let h = Hashset.Combine.combine h hl in
-    hcons (Cons (x, h, l))*/
 }
 
 
 impl RawLevel {
     fn equal(&self, y: &Self) -> bool {
-        self as *const _ == y as *const _ ||
-            match (self, y) {
-                (&RawLevel::Prop, &RawLevel::Prop) => true,
-                (&RawLevel::Set, &RawLevel::Set) => true,
-                (&RawLevel::Level(n, ref d), &RawLevel::Level(n_, ref d_)) =>
-                    n == n_ && d.equal(&**d_),
-                (&RawLevel::Var(n), &RawLevel::Var(n_)) => n == n_,
-                (_, _) => false,
-            }
-    }
-
-    fn hcons<'a>(&'a self, u: &'a HDp) -> Cow<'a, RawLevel> {
-        match *self {
-            RawLevel::Prop => Cow::Borrowed(self),
-            RawLevel::Set => Cow::Borrowed(self),
-            RawLevel::Level(n, ref d) => {
-                let d_ = d.hcons(u);
-                if &*d_ as *const _ == &**d as *const _ { Cow::Borrowed(self) } else {
-                    Cow::Owned(RawLevel::Level(n, ORef(Arc::new(d_.into_owned()))))
-                }
-            },
-            RawLevel::Var(_) => Cow::Borrowed(self),
-        }
-    }
-
-    fn hequal(&self, y: &Self) -> bool {
-        self as *const _ == y as *const _ ||
         match (self, y) {
             (&RawLevel::Prop, &RawLevel::Prop) => true,
             (&RawLevel::Set, &RawLevel::Set) => true,
             (&RawLevel::Level(n, ref d), &RawLevel::Level(n_, ref d_)) =>
-                n == n_ && &**d as *const _ == &**d_ as *const _,
+                n == n_ && d.equal(d_),
+            (&RawLevel::Var(n), &RawLevel::Var(n_)) => n == n_,
+            (_, _) => false,
+        }
+    }
+
+    fn compare(&self, v: &Self) -> Ordering {
+        match (self, v) {
+            (&RawLevel::Prop, &RawLevel::Prop) => Ordering::Equal,
+            (&RawLevel::Prop, _) => Ordering::Less,
+            (_, &RawLevel::Prop) => Ordering::Greater,
+            (&RawLevel::Set, &RawLevel::Set) => Ordering::Equal,
+            (&RawLevel::Set, _) => Ordering::Less,
+            (_, &RawLevel::Set) => Ordering::Greater,
+            (&RawLevel::Level(i1, ref dp1), &RawLevel::Level(i2, ref dp2)) => {
+                match i1.cmp(&i2) {
+                    Ordering::Less => Ordering::Less,
+                    Ordering::Greater => Ordering::Greater,
+                    Ordering::Equal => dp1.compare(dp2),
+                }
+            },
+            (&RawLevel::Level(_, _), _) => Ordering::Less,
+            (_, &RawLevel::Level(_, _)) => Ordering::Greater,
+            (&RawLevel::Var(n), &RawLevel::Var(m)) => n.cmp(&m),
+        }
+    }
+
+    fn hequal(&self, y: &Self) -> bool {
+        match (self, y) {
+            (&RawLevel::Prop, &RawLevel::Prop) => true,
+            (&RawLevel::Set, &RawLevel::Set) => true,
+            (&RawLevel::Level(n, ref d), &RawLevel::Level(n_, ref d_)) =>
+                n == n_ && HashconsedType::<Hlist<_, _, _, fn(&Hstring, _) -> _>>::eq(d, d_),
             (&RawLevel::Var(n), &RawLevel::Var(n_)) => n == n_,
             _ => false,
         }
     }
 
-    fn hash(&self) -> i64 {
+    /* fn hash(&self) -> i64 {
         match *self {
             RawLevel::Prop => combine::combinesmall(1, 0),
             RawLevel::Set => combine::combinesmall(1, 1),
@@ -267,12 +261,12 @@ impl RawLevel {
             RawLevel::Level(n, ref d) =>
                 combine::combinesmall(3, combine::combine(n, d.hash()))
         }
-    }
+    } */
 }
 
 /// Hashcons on levels + their hash
-impl HashconsedType<HDp> for Level {
-    fn eq(&self, y: &Self) -> bool {
+impl Level {
+    fn hequal(&self, y: &Self) -> bool {
         self.hash == y.hash && self.data.hequal(&y.data)
     }
 
@@ -280,39 +274,13 @@ impl HashconsedType<HDp> for Level {
         self.hash
     }
 
-    fn hashcons(&self, u: &HDp) -> Cow<Self> {
-        let data_ = self.data.hcons(u);
-
-        if &self.data as *const _ == &*data_ as *const _ { Cow::Borrowed(self) } else {
-            Cow::Owned(Level {
-                hash: self.hash,
-                data: data_.into_owned(),
-            })
-        }
+    fn data(&self) -> &RawLevel {
+        &self.data
     }
-    // let eq x y = x.hash == y.hash && RawLevel.hequal x.data y.data
-    // let hash x = x.hash
-    // let hashcons () x =
-    //   let data' = RawLevel.hcons x.data in
-    //   if x.data == data' then x else { x with data = data' }
-}
 
-impl Level {
     pub fn equal(&self, y: &Self) -> bool {
-        self as *const _ == y as *const _ ||
         self.hash == y.hash &&
         self.data.equal(&y.data)
-    }
-
-    fn hash(&self) -> i64 {
-        self.hash
-    }
-
-    fn hcons<'a>(&'a self, u: &'a Hlevel) -> Cow<'a, Self> {
-        // <List::<Str> as HashconsedType::<(Table::<List<Str>, Table<Str, ()>>, (), Baz)>>::hashcons(&dp, &(foo2, (), FOO))
-        // self.hashcons(&(u, (), Hstring::hcons))
-        u.hcons(self)
-        // dp.hashcons::<Table::<Str, ()>>(&(foo2, Foo::hcons))
     }
 }
 
@@ -345,104 +313,36 @@ impl ::std::hash::Hash for Level {
     }
 }
 
-impl HashconsedType<Hlevel> for Expr {
-    fn hashcons(&self, u: &Hlevel) -> Cow<Self> {
-        let Expr(ref b, n) = *self;
-        let b_ = b.hcons(u);
-        if &*b_ as *const _ == b as *const _ { Cow::Borrowed(self) } else {
-            Cow::Owned(Expr(b_.into_owned(), n))
-        }
-    }
-
-    fn eq(&self, l2: &Self) -> bool {
-        self as *const _ == l2 as *const _ ||
+impl Expr {
+    fn hequal(&self, l2: &Self) -> bool {
         match (self, l2) {
             (&Expr(ref b, n), &Expr(ref b_, n_)) =>
-                b as *const _ == b_ as *const _ && n == n_,
+                b.hequal(b_) && n == n_,
         }
     }
 
-    fn hash(&self) -> i64 {
+    fn hash(&self) -> IdxResult<i64> {
         let Expr(ref x, n) = *self;
-        // FIXME: check overflow
-        n + x.hash()
+        n.checked_add(x.hash()).ok_or(IdxError::from(NoneError))
     }
-    //   type t = _t
-    //   type u = Level.t -> Level.t
-    //   let hashcons hdir (b,n as x) =
-	// let b' = hdir b in
-	//   if b' == b then x else (b',n)
-    //   let eq l1 l2 =
-    //     l1 == l2 ||
-    //     match l1,l2 with
-	// | (b,n), (b',n') -> b == b' && n == n'
-
-    //   let hash (x, n) = n + Level.hash x
 }
 
-/* impl<T> PartialEq for HList<T> {
-    fn eq(&self, l2: &Self) -> bool {
-        match (self, l2) {
-            (&HList::Nil, &HList::Nil) => true,
-            (&HList::Cons(ref x1, _, ref l1), &HList::Cons(ref x2, _, ref l2)) =>
-                x1 as *const _ == x2 as *const _ &&
-                l1 as *const _ == l2 as *const _,
-            _ => false,
-        }
+impl Hashconsed<()> for Expr {
+    /// NOTE: Right now we assume Dps are all already hash consed, so we don't need HDp to
+    /// implement this.
+    fn hcons(self, _: &Hexpr) -> Self {
+        self
     }
-} */
 
-/*trait HashedList<M> where M: HashConsed {
-    fn
-}
-sig
-  type t = private Nil | Cons of M.t * int * t
-  val nil : t
-  val cons : M.t -> t -> t
-end =
-struct
-  type t = Nil | Cons of M.t * int * t
-  module Self =
-  struct
-    type _t = t
-    type t = _t
-    type u = (M.t -> M.t)
-    let hash = function Nil -> 0 | Cons (_, h, _) -> h
-    let eq l1 l2 = match l1, l2 with
-    | Nil, Nil -> true
-    | Cons (x1, _, l1), Cons (x2, _, l2) -> x1 == x2 && l1 == l2
-    | _ -> false
-    let hashcons hc = function
-    | Nil -> Nil
-    | Cons (x, h, l) -> Cons (hc x, h, l)
-  end
-  module Hcons = Hashcons.Make(Self)
-  let hcons = Hashcons.simple_hcons Hcons.generate Hcons.hcons M.hcons
-  (** No recursive call: the interface guarantees that all HLists from this
-      program are already hashconsed. If we get some external HList, we can
-      still reconstruct it by traversing it entirely. *)
-  let nil = Nil
-  let cons x l =
-    let h = M.hash x in
-    let hl = match l with Nil -> 0 | Cons (_, h, _) -> h in
-    let h = Hashset.Combine.combine h hl in
-    hcons (Cons (x, h, l))
-end*/
+    fn hash(&self) -> IdxResult<i64> {
+        Expr::hash(self)
+    }
 
-impl<T> HList<T> {
-    /*fn map(&self) {
-        match *self {
-            HList::Nil => Nil,
-            HList::Cons(ref x, _, ref l) =>
-        }
-        self.cons()
-    }*/
-  /*let rec map f = function
-  | Nil -> nil
-  | Cons (x, _, l) -> cons (f x) (map f l)
-
-  let smartmap = map*/
-
+    /// Interestingly, this just uses normal equality, which suggests that we really *aren't*
+    /// relying on the hash consing in any fundamental way...
+    fn eq(&self, y: &Self) -> bool {
+        self.equal(y)
+    }
 }
 
 impl CanonicalArc {
@@ -570,6 +470,10 @@ impl CanonicalArc {
 }
 
 impl Level {
+    /// Worked out elsewhere; if this is wrong, we can figure out another way to get this value.
+    const PROP : Self = Level { hash: 7, data: RawLevel::Prop };
+    const SET : Self = Level { hash: 8, data: RawLevel::Set };
+
     fn is_prop(&self) -> bool {
         match self.data {
             RawLevel::Prop => true,
@@ -584,9 +488,16 @@ impl Level {
         }
     }
 
-    /// Worked out elsewhere; if this is wrong, we can figure out another way to get this value.
-    const PROP : Self = Level { hash: 7, data: RawLevel::Prop };
-    const SET : Self = Level { hash: 8, data: RawLevel::Prop };
+    fn compare(&self, v: &Self) -> Ordering {
+        if self.hequal(v) { Ordering::Equal }
+        else {
+            match self.hash().cmp(&v.hash()) {
+                Ordering::Equal => self.data().compare(v.data()),
+                // FIXME: Is hash ordering really reliable?
+                o => o,
+            }
+        }
+    }
 
     /// Every Level.t has a unique canonical arc representative
 
@@ -629,8 +540,7 @@ impl Level {
 
     /// The universe should actually be in the universe map, or else it will return an error.
     fn check_eq(&self, v: &Level, g: &Universes) -> UnivResult<bool> {
-        Ok(self as *const _ == v as *const _ ||
-           self.check_equal(v, g)?)
+        Ok(self.check_equal(v, g)?)
     }
 
     /// The universe should actually be in the universe map, or else it will return an error.
@@ -651,28 +561,14 @@ impl Expr {
     /// Worked out elsewhere; if this is wrong, we can figure out another way to get this value.
     const PROP : Self = Expr(Level::PROP, 0);
 
-    fn hcons<'a>(&'a self, u: &'a Hexpr) -> Cow<'a, Self> {
-        // <List::<Str> as HashconsedType::<(Table::<List<Str>, Table<Str, ()>>, (), Baz)>>::hashcons(&dp, &(foo2, (), FOO))
-        // self.hashcons(&(u, (), Hstring::hcons))
-        u.hcons(self)
-        // dp.hashcons::<Table::<Str, ()>>(&(foo2, Foo::hcons))
+    const SET : Self = Expr(Level::SET, 0);
+
+    const TYPE1 : Self = Expr(Level::SET, 1);
+
+    fn is_prop(&self) -> bool {
+        if let Expr(ref l, 0) = *self { l.is_prop() }
+        else { false }
     }
-
-    /* fn eq(&self, y: &Self) -> bool {
-        self as *const _ == y as *const _ ||
-        {
-            let Expr(ref u, n) = *self;
-            let Expr(ref v, n_) = *y;
-            n == n_ && u.equal(v)
-        }
-    } */
-
-    // let hcons =
-    //   Hashcons.simple_hcons H.generate H.hcons Level.hcons
-    // let hash = ExprHash.hash
-    // let eq x y = x == y ||
-    //   (let (u,n) = x and (v,n') = y in
-    //      Int.equal n n' && Level.equal u v)
 
     fn equal(&self, y: &Self) -> bool {
         let Expr(ref u, n) = *self;
@@ -680,38 +576,41 @@ impl Expr {
         n == n_ && u.equal(v)
     }
 
-    fn map<'a, F>(&'a self, f: F, u: &'a Hexpr) -> Cow<'a, Self>
+    fn successor(&self) -> IdxResult<Self> {
+        let Expr(ref u, n) = *self;
+        if u.is_prop() { Ok(Self::TYPE1) }
+        // NOTE: Assuming Dps are all maximally hconsed already when loaded from the file, we just
+        // need to clone() here to retain maximal sharing.
+        else { Ok(Expr(u.clone(), n.checked_add(1).ok_or(IdxError::from(NoneError))?)) }
+    }
+
+    fn super_(&self, y: &Self) -> Result<bool, Ordering> {
+        let Expr(ref u, n) = *self;
+        let Expr(ref v, n_) = *self;
+        match u.compare(v) {
+            Ordering::Equal => if n < n_ { Ok(true) } else { Ok(false) },
+            _ if self.is_prop() => Ok(true),
+            _ if y.is_prop() => Ok(false),
+            o => Err(o)
+        }
+    }
+
+    fn map<F, E>(&self, f: F, u: &Hexpr) -> Result<Self, E>
         where
-            F: for<'b> Fn(&'b Level) -> Cow<'b, Level>,
+            F: Fn(&Level) -> Result<Level, E>,
     {
         let Expr(ref v, n) = *self;
-        let v_ = f(v);
-        match v_ {
-            Cow::Borrowed(_) => Cow::Borrowed(self), // Has to be the same
-            Cow::Owned(v_) => {
-                // Bellow is impossible because we don't have a pointer to a Level, but an actual
-                // Level.
-                /* if v_ as *const _ == v as *const _ { Cow::Borrowed(self) }
-                else */if v_.is_prop() && n != 0 {
-                    // No choice but into_owned here.
-                    Cow::Owned(Expr(Level::SET, n).hcons(u).into_owned())
-                } else {
-                    // Again, no choice but into_owned here.
-                    Cow::Owned(Expr(v_, n).hcons(u).into_owned())
-                }
-            }
-        }
-        // let map f (v, n as x) =
-        //   let v' = f v in
-	    // if v' == v then x
-	    // else if Level.is_prop v' && n != 0 then
-	    //   hcons (Level.set, n)
-	    // else hcons (v', n)
+        let v_ = f(v)?;
+        Ok(if v_.is_prop() && n != 0 {
+            Expr(Level::SET, n).hcons(u)
+        } else {
+            Expr(v_, n).hcons(u)
+        })
     }
 
     /// The universe should actually be in the universe map, or else it will return an error.
     fn check_equal(&self, y: &Self, g: &Universes) -> UnivResult<bool> {
-        Ok(self as *const _ == y as *const _ || {
+        Ok(self.hequal(y) || {
             let Expr(ref u, n) = *self;
             let Expr(ref v, m) = *y;
             n == m && u.check_equal(v, g)?
@@ -744,13 +643,10 @@ impl Expr {
 
 impl Univ {
     pub fn equal(&self, y: &Self) -> bool {
-        self as *const _ == y as *const _ ||
+        self.hequal(y) ||
         self.hash() == y.hash() &&
         self.for_all2(y, Expr::equal)
     }
-    /*let equal x y = x == y ||
-    (Huniv.hash x == Huniv.hash y &&
-       Huniv.for_all2 Expr.equal x y)*/
 
     pub fn is_type0m(&self) -> bool {
         // I believe type0m is:
@@ -765,6 +661,43 @@ impl Univ {
                 if let HList::Nil = *l { true } else { false }
             }
         }
+    }
+
+    pub fn is_type0(&self) -> bool {
+        // I believe type0 is:
+        //    Cons (({ hash = 8; data = Set }, 0), 524792, Nil)
+        // Details worked out elsewhere; if they're wrong, we can fgure out something else.
+        match *self {
+            HList::Nil => false,
+            HList::Cons(ref o) => {
+                let (ref x, h, ref l) = **o;
+                h == 524792 &&
+                x.equal(&Expr::SET) &&
+                if let HList::Nil = *l { true } else { false }
+            }
+        }
+    }
+
+    /// Returns the formal universe that lies just above the universe variable u.
+    /// Used to type the sort u.
+    pub fn super_(&self, u: &Huniv) -> IdxResult<Self> {
+        self.map( |x| x.successor(), u )
+    }
+
+    fn sort(&self, tbl: &Huniv) -> IdxResult<Self> {
+        fn aux(a: &Expr, mut l: Univ, tbl: &Huniv) -> IdxResult<Univ> {
+            while let HList::Cons(o) = l {
+                match a.super_(&(*o).0) {
+                    Ok(false) => { l = (*o).2.clone(); },
+                    Ok(true) => return Ok(HList::Cons(o)),
+                    Err(Ordering::Less) => return Univ::cons(a.clone(), HList::Cons(o), tbl),
+                    Err(_) =>
+                        return Univ::cons((&(*o).0).clone(), aux(a, (&(*o).2).clone(), tbl)?, tbl),
+                }
+            }
+            Univ::cons(a.clone(), l, tbl)
+        }
+        self.iter().fold(Ok(HList::nil()), |acc, a| aux(a, acc?, tbl))
     }
 
     /// Then, checks on universes
@@ -789,7 +722,7 @@ impl Univ {
 
     /// The universe should actually be in the universe map, or else it will return an error.
     pub fn check_eq(&self, v: &Self, g: &Universes) -> UnivResult<bool> {
-        Ok(self as *const _ == v as *const _ ||
+        Ok(self.hequal(v) ||
            self.check_eq_univs(v, g)?)
     }
 
@@ -805,7 +738,7 @@ impl Univ {
 
     /// The universe should actually be in the universe map, or else it will return an error.
     pub fn check_leq(&self, v: &Self, g: &Universes) -> UnivResult<bool> {
-        Ok(self as *const _ == v as *const _ ||
+        Ok(self.hequal(v) ||
            self.is_type0m() ||
            self.check_eq_univs(v, g)? ||
            self.real_check_leq(v, g)?)
@@ -814,7 +747,7 @@ impl Univ {
 
 impl Instance {
     pub fn equal(&self, u: &Self) -> bool {
-        self as *const _ == u as *const _ ||
+        &***self as *const _ == &***u as *const _ ||
         (self.is_empty() && u.is_empty()) ||
         (/* Necessary as universe instances might come from different modules and
             unmarshalling doesn't preserve sharing */
@@ -823,7 +756,7 @@ impl Instance {
 
     /// The universe should actually be in the universe map, or else it will return an error.
     pub fn check_eq(&self, t2: &Instance, g: &Universes) -> UnivResult<bool> {
-        if self as *const _ == t2 as *const _ { return Ok(true) }
+        if &***self as *const _ == &***t2 as *const _ { return Ok(true) }
         if self.len() != t2.len() { return Ok(false) }
         // NOTE: We don't just use any / all because we want to propagate errors; there may be a
         // way to do both somehow.
@@ -838,34 +771,25 @@ impl Instance {
     /// Substitution functions
 
     /// Substitute instance inst for ctx in csts
-
-    /*fn subst_instance_level(s, l) {
-        match l.level.data {
-        }
-    }*/
-
-    pub fn subst_instance(&self, i: &Instance) -> Cow<Instance> {
-        panic!("")
-
+    fn subst_instance_level(&self, l: &Level) -> SubstResult<Level> {
+        Ok(match l.data {
+            RawLevel::Var(n) => {
+                // TODO: Check whether this get is handled at typechecking time?
+                let n = usize::try_from(n).map_err(IdxError::from)?;
+                // TODO: Check whether this is checked at typechecking time?
+                self.get(n).ok_or(SubstError::NotFound)?
+            },
+            _ => l,
+        }.clone())
     }
 
-    pub fn subst_universe(&self, u: &Univ) -> Cow<Univ> {
-        panic!("")
+    pub fn subst_instance(&self, i: &Instance) -> SubstResult<Instance> {
+        i.smart_map( |l| self.subst_instance_level(l), Level::hequal)
     }
 
-/*val subst_instance_instance : universe_instance -> universe_instance -> universe_instance
-val subst_instance_universe : universe_instance -> universe -> universe
-    let subst_instance_level s l =
-      match l.Level.data with
-      | Level.Var n -> s.(n)
-      | _ -> l
-
-    let subst_instance_instance s i =
-      Array.smartmap (fun l -> subst_instance_level s l) i
-
-    let subst_instance_universe s u =
-      let f x = Universe.Expr.map (fun u -> subst_instance_level s u) x in
-      let u' = Universe.smartmap f u in
-        if u == u' then u
-        else Universe.sort u'*/
+    pub fn subst_universe(&self, u: &Univ, tbl: &Huniv) -> SubstResult<Univ> {
+        let u_ = u.smart_map( |x| x.map( |u| self.subst_instance_level(u), &()), tbl)?;
+        if u.hequal(&u_) { Ok(u_) }
+        else { Ok(u_.sort(tbl)?) }
+    }
 }

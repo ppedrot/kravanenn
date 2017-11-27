@@ -8,7 +8,6 @@ use ocaml::de::{
 use ocaml::values::{
     List,
 };
-use std::borrow::{Cow};
 use std::sync::{Arc};
 
 pub use self::make::{Table};
@@ -34,8 +33,8 @@ pub trait HashconsedType<
     /// The actual hashconsing function, using its fist argument to recursively
     /// hashcons substructures. It should be compatible with [eq], that is
     /// [eq x (hashcons f x) = true].
-    fn hashcons<'a, 'b>(&'a self, &'a U) -> Cow<'b, Self>
-        where Self: ToOwned, U: 'b, 'b: 'a;
+    fn hashcons<'a>(self, &'a U) -> Self
+        where Self: ToOwned;
 
     /// A comparison function. It is allowed to use physical equality
     /// on the sub-terms hashconsed by the [hashcons] function, but it should be
@@ -53,7 +52,6 @@ mod make {
 
     use coq::lib::hashcons::HashconsedType;
     use cuckoo::{CuckooHashMap};
-    use std::borrow::{Cow};
     use std::hash::{BuildHasherDefault, Hash, Hasher};
     use std::marker::{PhantomData};
 
@@ -89,6 +87,19 @@ mod make {
         pub u: U,
     }
 
+    impl<T, U> Default for Table<T, U>
+        where
+            T: HashconsedType<U>,
+            U: Default,
+    {
+        fn default() -> Self {
+            Table {
+                tab: Htbl::default(),
+                u: U::default(),
+            }
+        }
+    }
+
     impl Hasher for KeyHasher {
         fn finish(&self) -> u64 {
             // FIXME: Ensure this is not negative.
@@ -104,7 +115,7 @@ mod make {
     }
 
     impl<T, U> Key<T, U> {
-        fn new(key: T) -> Self {
+        pub fn new(key: T) -> Self {
             Key {
                 key: key,
                 marker: PhantomData,
@@ -142,12 +153,11 @@ mod make {
         }
 
         /// Perform the hashconsing of the given object within the table.
-        pub fn hcons<'a>(&'a self, x: &'a T) -> Cow<T>
+        pub fn hcons<'a>(&'a self, x: T) -> T
             where
                 T: ToOwned,
         {
             let y = x.hashcons(&self.u);
-            // t.tab.upsert()
             // t.tab.repr(y.hash(), y)
             y
         }
@@ -161,23 +171,21 @@ impl<'a, T, U, V, H> HashconsedType<Hlist<'a, T, U, V, H>> for List<T>
         where
             T: Clone,
             T: HashconsedType<V>,
-            H: for<'b> Fn(&'b U, &'b T) -> Cow<'b, T>,
+            H: for<'b> Fn(&'b U, T) -> T,
 {
-    fn hashcons<'b>(&'b self, th: &'b Hlist<'a, T, U, V, H>) -> Cow<'a, Self> {
-        match *self {
-            List::Cons(ref o) => {
-                let (ref x, ref l) = **o;
+    fn hashcons<'b>(self, th: &'b Hlist<'a, T, U, V, H>) -> Self {
+        let y = match self {
+            List::Cons(o) => {
+                let (ref x, ref l) = *o;
                 let (ref tab, _, ref h) = *th;
-                let x = h(&tab.u, x);
-                let l = l.hashcons(th);
-                // FIXME: If they both return Borrowed, shouldn't we just return self?  Or is there
-                // something else that will prevent that from happening in practice?
-                let y = Cow::Owned(List::Cons(ORef(Arc::new((x.into_owned(), l.into_owned())))));
-                // t.tab.repr(y.hash(), y)
-                y
+                let x = h(&tab.u, x.clone());
+                let l = (&*l).clone().hashcons(th);
+                List::Cons(ORef(Arc::new((x, l))))
             },
-            List::Nil => Cow::Borrowed(self),
-        }
+            List::Nil => List::Nil
+        };
+        // t.tab.repr(y.hash(), y)
+        y
     }
 
     fn eq(&self, l2: &Self) -> bool {
@@ -185,10 +193,7 @@ impl<'a, T, U, V, H> HashconsedType<Hlist<'a, T, U, V, H>> for List<T>
         match (self, l2) {
             (&List::Nil, &List::Nil) => true,
             (&List::Cons(ref o1), &List::Cons(ref o2)) => {
-                let (ref x1, ref l1) = **o1;
-                let (ref x2, ref l2) = **o2;
-                x1 as *const _ == x2 as *const _ &&
-                l1 as *const _ == l2 as *const _
+                &**o1 as *const _ == &**o2 as *const _
             },
             _ => false,
         }
@@ -204,8 +209,8 @@ impl<'a, T, U, V, H> HashconsedType<Hlist<'a, T, U, V, H>> for List<T>
 pub type Hstring = Table<Str, ()>;
 
 impl HashconsedType<()> for Str {
-    fn hashcons(&self, _: &()) -> Cow<Self> {
-        Cow::Borrowed(self)
+    fn hashcons(self, _: &()) -> Self {
+        self
     }
 
     fn eq(&self, s2: &Self) -> bool {
@@ -214,114 +219,7 @@ impl HashconsedType<()> for Str {
 
     fn hash(&self) -> i64 {
         // The cast to i64 is safe because casting u8 to i64 is always valid.
-        // FIXME: Overflow.
+        // FIXME: Overflow (wait, does overflow actually matter here?)
         self.iter().fold(0, |accu, c| accu * 19 + *c as i64)
     }
 }
-
-/* /// Wrappers
-///
-/// These are intended to be used together with instances of the [Make]
-/// functor.
-
-pub struct SimpleHCons<T, U>
-{
-    table: Table<T, U>,
-}
-
-pub struct RecursiveHCons<T, U>
-{
-    table: Table<T, ((T -> T), U)>,
-}
-
-/// [simple_hcons f sub obj] creates a new table each time it is applied to any
-/// sub-hash function [sub].
-impl<T, U> SimpleHCons<T, U>
-{
-    pub fn simple(u: U) -> Self
-        where
-            T: HashconsedType<U>,
-    {
-        SimpleHCons {
-            table: table::Table::generate(u),
-        }
-    }
-
-    pub fn hcons(self, x: T) -> T
-        where
-            T: HashconsedType<U>,
-    {
-        table::Table::hcons(self.table, x)
-    }
-}
-
-impl<T, U> SimpleHCons<T, ((T -> T), U)>
-{
-    pub fn recursive(u: U) -> Self
-    {
-        let loop_ = Arc::new(Lazy::new());
-        let loop__ = loop_.clone();
-        let self_ = move |x| loop__.get().unwrap(x);
-        /* let table = SimpleHCons {
-            table: table::Table::generate((self_, u))
-        }; */
-        let table = table::Table::generate((self_, u));
-        let hrec = Arc::new(move |x| table::Table::hcons(table, x));
-        loop_.get_or_create(move || hrec ).clone()
-    }
-}
-
-impl<T, Tab, F> Deref for RecursiveHConsWrapper<T, Tab, F> {
-    type Target = RecursiveHCons<T, Tab, F>;
-
-impl<T, U, F> RecursiveHCons<T, U, F>
-{
-    pub fn new(f: F, u: U) -> Arc<Self>
-        where
-            T: HashconsedType<U>,
-    {
-  // module Hdir = Hashcons.Hlist(Id)
-
-  // let hcons = Hashcons.recursive_hcons Hdir.generate Hdir.hcons Id.hcons
-    let loop_ = Arc::new(Lazy::new());
-    let loop__ = loop_.clone();
-    let self_ = move |x| loop__.get().unwrap()(x);
-    let table = Table::generate(u);
-        Table {
-                  tab: HTbl::with_capacity_and_hash_state(97, Default::default()),
-                  u: (self_, Id.hcons) : (Arc<Lazy<Fn(T, (HTbl<T>, U)) -> T>, (HTbl<T>, U)) where U: Fn(Str, (HTbl<Str>, &())) -> Str
-              };
-    let hrec = Arc::new(|x|
-  let hcons = loop_;
-        let self_ = Arc::new(RecursiveHCons {
-            table: Lazy::new(),
-        });
-        // Initialize the table.
-        self_.table.get_or_create( move ||
-            // The interior pointer is weak, because we have a reference cycle here and want to
-            // make sure it gets broken when the outer RecursiveHCons is dropped.
-            h((self_.downgrade(), u))
-        );
-        self_
-        // let loop_ = Arc::new(Lazy::new());
-        // let loop__ = loop_.clone();
-        // let self_ = move |x| loop__.get().unwrap(x);
-        // let table = h(self_, u);
-        // let hrec = Arc::new(|x| f(table, x));
-        // loop_.get_or_create(move || hrec ).clone()
-    }
-
-    pub fn hcons(self, x: T) -> T
-        where
-            F: Fn(&Tab, T) -> T,
-    {
-        f(&self.table, x)
-    }
-}
-
-impl<T, Tab, F> Drop for RecursiveHCons<T, Tab, F>
-{
-    pub fn drop(&mut self) {
-        // We have a weak pointer that contains ourselves; make sure to get rid of it!
-    }
-}*/
