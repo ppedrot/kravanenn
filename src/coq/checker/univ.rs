@@ -48,8 +48,6 @@ enum UnivEntry {
 
 pub struct Universes(UMap<UnivEntry>);
 
-pub struct LevelMap();
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UnivError {
     Anomaly(String),
@@ -60,8 +58,6 @@ pub enum SubstError {
     NotFound,
     Idx(IdxError),
 }
-
-// type LMap<T> = HashMap<Level, T>;
 
 type UMap<T> = HashMap<Level, T>;
 
