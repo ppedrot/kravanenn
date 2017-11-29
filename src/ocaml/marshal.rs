@@ -375,6 +375,12 @@ pub fn read_object<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   Ok((header, ans))
 }
 
+pub fn read_magic<T : Read>(f : &mut T) -> Result<()> {
+  // TODO: check magic number
+  let _ = try!(parse_u32(f));
+  Ok(())
+}
+
 pub fn read_segment<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   // Offset
   let _ = try!(parse_u32(f));
@@ -384,6 +390,15 @@ pub fn read_segment<T : Read>(f : &mut T) -> Result<(Header, ObjRepr)>{
   let buf = &mut [0; 16];
   let _ = try!(f.read_exact(buf));
   Ok(mem)
+}
+
+pub fn skip_segment<T : Read + Seek>(f : &mut T) -> Result<()> {
+  // Offset
+  let pos = try!(parse_u32(f));
+  // Ignore the digest
+  let pos = pos + 16;
+  let _ = try!(f.seek(std::io::SeekFrom::Start(pos as u64)));
+  Ok(())
 }
 
 fn read_segment_header<T : Read + Seek>(f : &mut T) -> Result<Option<Header>>{
