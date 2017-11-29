@@ -7,8 +7,10 @@ use std::io::{Write, Seek, SeekFrom};
 use std::str::FromStr;
 use kravanenn::*;
 use kravanenn::ocaml::values::{Opaques, LibSum, Any, UnivOpaques, Lib};
+use kravanenn::coq::checker::checker::{LoadPath};
 
 fn main () {
   let args : Vec<String> = std::env::args().collect();
-  kravanenn::coq::checker::checker::check(args.as_ref());
+  let lp = LoadPath::new();
+  kravanenn::coq::checker::checker::check(&lp, args.as_ref());
 }
