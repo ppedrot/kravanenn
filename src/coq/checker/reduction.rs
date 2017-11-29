@@ -11,6 +11,7 @@ use coq::checker::closure::{
     Reds,
     Stack,
     StackMember,
+    Subs,
     TableKey,
     TableKeyC,
 };
@@ -31,7 +32,6 @@ use coq::kernel::esubst::{
     IdxError,
     IdxResult,
     Lift,
-    SubsV as Subs,
 };
 use core::convert::{TryFrom};
 use core::nonzero::{NonZero};
@@ -327,9 +327,11 @@ impl Constr {
                 let mut globals = Globals::default();
                 *self = Set::new( |set| {
                     let constr_arena = Arena::with_capacity(0x2000);
+                    let (fconstr_arena, term_arena);
+                    fconstr_arena = Arena::with_capacity(0x10000);
                     // (8 * 2^20, just an arbitrary number to start with).
-                    let term_arena = Arena::with_capacity(0x800000);
-                    let ctx = Context::new(&term_arena, &constr_arena);
+                    term_arena = Arena::with_capacity(0x800000);
+                    let ctx = Context::new(&term_arena, &constr_arena, &fconstr_arena);
                     let mut infos = Infos::create(set, Reds::BETAIOTAZETA,
                                                   iter::empty())?;
                     let v = self.inject(&infos.set, ctx)?;
@@ -354,9 +356,11 @@ impl Constr {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
                 *self = Set::new( |set| {
                     let constr_arena = Arena::with_capacity(0x2000);
+                    let (fconstr_arena, term_arena);
+                    fconstr_arena = Arena::with_capacity(0x10000);
                     // (8 * 2^20, just an arbitrary number to start with).
-                    let term_arena = Arena::with_capacity(0x800000);
-                    let ctx = Context::new(&term_arena, &constr_arena);
+                    term_arena = Arena::with_capacity(0x800000);
+                    let ctx = Context::new(&term_arena, &constr_arena, &fconstr_arena);
                     let mut infos = Infos::create(set, Reds::BETADELTAIOTA,
                                                   rel_context.iter_mut())?;
                     let v = self.inject(&infos.set, ctx)?;
@@ -381,9 +385,11 @@ impl Constr {
                 let Env { ref mut globals, ref mut rel_context, .. } = *env;
                 *self = Set::new( |set| {
                     let constr_arena = Arena::with_capacity(0x2000);
+                    let (fconstr_arena, term_arena);
+                    fconstr_arena = Arena::with_capacity(0x10000);
                     // (8 * 2^20, just an arbitrary number to start with).
-                    let term_arena = Arena::with_capacity(0x800000);
-                    let ctx = Context::new(&term_arena, &constr_arena);
+                    term_arena = Arena::with_capacity(0x800000);
+                    let ctx = Context::new(&term_arena, &constr_arena, &fconstr_arena);
                     let mut infos = Infos::create(set, Reds::BETADELTAIOTANOLET,
                                                   rel_context.iter_mut())?;
                     let v = self.inject(&infos.set, ctx)?;
@@ -1087,8 +1093,8 @@ impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
                                                    &el1, &el2, fty1, fty2, ctx, ctx_,
                                                    send, send_, recv, recv_)));
                         }
-                        let mut e1 = e1.clone(&self.set); // expensive
-                        let mut e2 = e2.clone(&infos_.set); // expensive
+                        let mut e1 = e1.clone(); // expensive
+                        let mut e2 = e2.clone(); // expensive
                         if let Some(n) = NonZero::new(n) {
                             // TODO: Figure out whether this block should be reachable.  If not, we
                             // should probably assert; if so, we might consider special casing the
@@ -1137,8 +1143,8 @@ impl<'id, 'id_, 'a, 'c, 'b, 'g> ClosInfos<'id, 'a, 'b> where 'g: 'b {
                                                    &el1, &el2, fty1, fty2, ctx, ctx_,
                                                    send, send_, recv, recv_)));
                         }
-                        let mut e1 = e1.clone(&self.set); // expensive
-                        let mut e2 = e2.clone(&infos_.set); // expensive
+                        let mut e1 = e1.clone(); // expensive
+                        let mut e2 = e2.clone(); // expensive
                         if let Some(n) = NonZero::new(n) {
                             // TODO: Figure out whether this block should be reachable.  If not, we
                             // should probably assert; if so, we might consider special casing the
@@ -1238,15 +1244,23 @@ impl<'b, 'g> Env<'b, 'g> {
             let constr_arena_ = constr_arenas_.alloc(Arena::with_capacity(0x2000));
             let constr_arenastk = constr_arenas.alloc(Arena::with_capacity(0x2000));
             let constr_arenastk_ = constr_arenas_.alloc(Arena::with_capacity(0x2000));
-            let term_arenas = Arena::new();
-            let term_arenas_ = Arena::new();
+            let (fconstr_arenas, term_arenas);
+            fconstr_arenas = Arena::new();
+            term_arenas = Arena::new();
+            let (fconstr_arenas_, term_arenas_);
+            fconstr_arenas_ = Arena::new();
+            term_arenas_ = Arena::new();
             // (8 * 2^20, just an arbitrary number to start with).
+            let fconstr_arena = fconstr_arenas.alloc(Arena::with_capacity(0x10000));
+            let fconstr_arena_ = fconstr_arenas_.alloc(Arena::with_capacity(0x10000));
+            let fconstr_arenastk = fconstr_arenas.alloc(Arena::with_capacity(0x10000));
+            let fconstr_arenastk_ = fconstr_arenas_.alloc(Arena::with_capacity(0x10000));
             let term_arena = term_arenas.alloc(Arena::with_capacity(0x800000));
             let term_arena_ = term_arenas_.alloc(Arena::with_capacity(0x800000));
             let term_arenastk = term_arenas.alloc(Arena::with_capacity(0x800000));
             let term_arenastk_ = term_arenas_.alloc(Arena::with_capacity(0x800000));
-            let ctx = Context::new(term_arena, constr_arena);
-            let ctx_ = Context::new(term_arena_, constr_arena_);
+            let ctx = Context::new(term_arena, constr_arena, fconstr_arena);
+            let ctx_ = Context::new(term_arena_, constr_arena_, fconstr_arena_);
             let infos =
                 Infos::create(set,
                               if eager_delta { Reds::BETADELTAIOTA } else { Reds::BETAIOTAZETA },
@@ -1263,7 +1277,7 @@ impl<'b, 'g> Env<'b, 'g> {
             let (sendstk_, recv_) = mpsc::sync_channel(0);
             rayon::scope( |scope| {
                 scope.spawn( move |_| {
-                    let ctxstk = Context::new(term_arenastk, constr_arenastk);
+                    let ctxstk = Context::new(term_arenastk, constr_arenastk, fconstr_arenastk);
                     /* Keep looping until the other end dies. */
                     while let Ok((mut v, hd, mut infos)) = recvstk.recv() {
                         let hd = v.whd_stack(&mut infos, globals, hd, ctxstk, (), ());
@@ -1273,7 +1287,8 @@ impl<'b, 'g> Env<'b, 'g> {
                     }
                 } );
                 scope.spawn( move |_| {
-                    let ctxstk_ = Context::new(term_arenastk_, constr_arenastk_);
+                    let ctxstk_ = Context::new(term_arenastk_, constr_arenastk_,
+                                               fconstr_arenastk_);
                     /* Keep looping until the other end dies. */
                     while let Ok((mut v, hd, mut infos)) = recvstk_.recv() {
                         let hd = v.whd_stack(&mut infos, globals, hd, ctxstk_, (), ());
