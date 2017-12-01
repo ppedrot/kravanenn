@@ -2,6 +2,7 @@ extern crate serde;
 
 use std::str;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::collections::{HashMap};
 use std::collections::hash_map::{Entry};
 use std::fs::File;
@@ -102,8 +103,8 @@ impl LoadPath {
       None => return None,
       Some(lp) => lp,
     };
-    let name = Str(Rc::new(String::from(name.clone()).into_bytes()));
-    Some(List::Cons(ORef(Rc::new((name, lp.clone())))))
+    let name = Str(Arc::new(String::from(name.clone()).into_bytes()));
+    Some(List::Cons(ORef(Arc::new((name, lp.clone())))))
   }
 
   // Associate a physical vo file to a logical path

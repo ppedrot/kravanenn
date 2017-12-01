@@ -1,5 +1,8 @@
 use coq::checker::environ::{EnvError, Globals};
-use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, Lift, SubsV as Subs};
+use coq::kernel::esubst::{Expr, Idx, IdxError, IdxResult, Lift, Subs as SubsRaw};
+use coq::kernel::names::{
+    KnUser,
+};
 use core::convert::{TryFrom};
 use core::nonzero::{NonZero};
 use core::ops::Deref;
@@ -22,17 +25,27 @@ use ocaml::values::{
     RDecl,
     RecordBody,
 };
-use std::borrow::{Cow};
-use std::cell::{Cell};
+use std::borrow::{Cow as RustCow};
+use std::cell::{Cell as RustCell};
 use std::collections::{HashMap};
 use std::collections::hash_map;
+use std::hash::{Hash, Hasher};
+use std::iter::{self};
 use std::mem;
 use std::option::{NoneError};
-use std::rc::{Rc};
+use std::sync::{Arc};
 use typed_arena::{Arena};
+use util::borrow::{Cow};
+use util::ghost_cell::{Cell, Set};
 use vec_map::{self, VecMap};
 
+pub type Subs<'id, 'a, 'b> = SubsRaw<&'a [FConstr<'id, 'a, 'b>]>;
+
 pub type MRef<'b, T> = &'b ORef<T>;
+
+/// A dumbed-down version of Cow that has no requirements on its type parameter.
+/// Used for implementig the immutable version of zip.
+type SCow<'b, T> = Cow<'b, T, T>;
 
 /*
  * Five kinds of reductions:
@@ -49,8 +62,8 @@ pub type MRef<'b, T> = &'b ORef<T>;
  * constants.
  */
 
-#[derive(Copy,Clone,Debug, Eq, Hash)]
-pub enum TableKey<T> where TableKey<T>: PartialEq {
+#[derive(Copy,Clone,Debug,Hash)]
+pub enum TableKey<T> {
     ConstKey(T),
     // should not occur
     // VarKey(Id),
@@ -101,9 +114,42 @@ bitflags! {
     }
 }
 
-pub struct Context<'a, 'b> where 'b: 'a {
-    term_arena: Arena<FTerm<'a, 'b>>,
-    // constr_arena: Arena<FConstr<'a, 'b>>
+#[derive(Copy, Clone)]
+pub struct Context<'id, 'a, 'b> where 'b: 'a, 'id: 'a {
+    /// The term arena; this is really a poor substitute for garbage collection, since it can't
+    /// free, but my suspicion is that it will still have better performance characteristics than
+    /// Arc.
+    term_arena: &'a Arena<FTerm<'id, 'a, 'b>>,
+    /// We need this arena for a kind of silly reason.   We need essentially all Constrs we
+    /// reference to have lifetime 'b, and if we get a Constr from a global we indeed have a
+    /// reference with lifetime 'b; so far, so good, right?  Unfortunately, in some cases (namely,
+    /// those with universe polymorphism) we actually need to modify the Constr in a way that we
+    /// don't want to share mutably with everyone each time, since it depends on the particular
+    /// universe with which it was instantiated.
+    ///
+    /// Note that this could be shared a la Globals, if we so chose.
+    ///
+    /// At first, I was sad about this, because it seemed to make the distinction between 'a and 'b
+    /// meaningless; but on further reflection, it actually makes it *meaningful* since before this
+    /// point there was not much reason for 'b to be different from 'a.  Now, it is clear where we
+    /// can't get away without an arena at all (constr_arena, which is actually a perfect use case
+    /// for an arena in the sense that we'd never deallocate these Constrs until we were done with
+    /// the reduction anyway), and where we might want to start looking for other means of GC
+    /// (term_arena).  However, it might be useful to use a structure other than an arena (like a
+    /// Vec with size "number of inds in the environment", combined with a sendable iterator over
+    /// the vector).  That would make it Sendable, but at the cost of some complexity.
+    constr_arena: &'b Arena<Constr>,
+    /// This arena could possibly be avoided, but we use it when we cons substitutions in order to
+    /// make them cheap to copy.  Since the elements in this arena don't have a destructor, the
+    /// drop should also be very fast (note that if we took this one step further and gave the
+    /// same treatment to the Subs vectors themselves, the FTerm arena could also almost be made to
+    /// have no destructors; the only cost would be that we couldn't mutate lifts in place, but
+    /// that's  not too useful too often (and in the handful of places where that is useful, maybe
+    /// we could have a specialized mutable version of the structure).  The only remaining place
+    /// where we'd have a Vec is the array used for lambda arguments, and as comments below point
+    /// out that doesn't really need to be a Vec anyway.
+    fconstr_arena: &'a Arena<FConstr<'id, 'a, 'b>>,
+    // constr_arena: Arena<FConstr<'id, 'a, 'b>>
     // Not clear to me if this would actually be an optimization (at least, not with the current
     // substitution structure).  The reason being that the amount of sharing we can actually get
     // out of it seems limited, since the interesting reduction steps usually require mutating
@@ -126,13 +172,16 @@ pub type TableKeyC<'b> = TableKey<MRef<'b, PUniverses<Cst>>>;
 // TODO: Use custom KeyHash algorithm.
 struct KeyTable<'b, T>(HashMap<TableKeyC<'b>, T>);
 
-pub struct Infos<'b, T> {
+pub struct Infos<'id, 'b, T> {
   flags : Reds,
   // i_repr : 'a infos -> constr -> 'a;
   // globals: &'a mut Globals<'g>,
   // i_rels : int * (int * constr) list;
   rels: (u32, VecMap<&'b mut Constr>),
   tab: KeyTable<'b, T>,
+  /// The owning set: if you want to do pretty much anything with an FConstr<'id, 'a, 'b>, you
+  /// need this in order to do it.
+  pub set: Set<'id>,
 }
 
 #[derive(Copy,Clone,Debug,PartialEq)]
@@ -153,42 +202,40 @@ pub enum RedState {
 /// type of shared terms. fconstr and frterm are mutually recursive.
 /// Clone of the constr structure, but completely mutable, and
 /// annotated with reduction state (reducible or not).
-#[derive(Clone,Debug)]
-pub struct FConstr<'a, 'b> where 'b: 'a {
-    norm: Cell<RedState>,
-    term: Cell<Option<&'a FTerm<'a, 'b>>>,
+pub struct FConstr<'id, 'a, 'b> where 'b: 'a, 'id: 'a {
+    norm: Cell<'id, RedState>,
+    term: Cell<'id, Option<&'a FTerm<'id, 'a, 'b>>>,
 }
 
-#[derive(Clone,Debug)]
-pub enum FTerm<'a, 'b> where 'b: 'a {
+pub enum FTerm<'id, 'a, 'b> where 'b: 'a, 'id: 'a {
   Rel(Idx),
   /// Metas and sorts; but metas shouldn't occur in a .vo...
   Atom(&'b Constr),
-  Cast(FConstr<'a, 'b>, MRef<'b, (Constr, Cast, Constr)>, FConstr<'a, 'b>),
+  Cast(FConstr<'id, 'a, 'b>, MRef<'b, (Constr, Cast, Constr)>, FConstr<'id, 'a, 'b>),
   Flex(TableKeyC<'b>),
   Ind(MRef<'b, PUniverses<Ind>>),
   Construct(MRef<'b, PUniverses<Cons>>),
-  App(FConstr<'a, 'b>, Vec<FConstr<'a, 'b>>),
-  Proj(&'b Cst, bool, FConstr<'a, 'b>),
-  Fix(MRef<'b, Fix>, usize, Subs<FConstr<'a, 'b>>),
-  CoFix(MRef<'b, CoFix>, usize, Subs<FConstr<'a, 'b>>),
-  Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>, FConstr<'a, 'b>,
-       Vec<FConstr<'a, 'b>>),
+  App(FConstr<'id, 'a, 'b>, Vec<FConstr<'id, 'a, 'b>>),
+  Proj(&'b Cst, bool, FConstr<'id, 'a, 'b>),
+  Fix(MRef<'b, Fix>, usize, Subs<'id, 'a, 'b>),
+  CoFix(MRef<'b, CoFix>, usize, Subs<'id, 'a, 'b>),
+  Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'id, 'a, 'b>,
+       FConstr<'id, 'a, 'b>, Vec<FConstr<'id, 'a, 'b>>),
   /// predicate and branches are closures
-  CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
-        Subs<FConstr<'a, 'b>>),
+  CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'id, 'a, 'b>,
+        Subs<'id, 'a, 'b>),
   Lambda(Vec</*(Name, Constr)*/MRef<'b, (Name, Constr, Constr)>>,
-         &'b Constr, Subs<FConstr<'a, 'b>>),
-  Prod(MRef<'b, (Name, Constr, Constr)>, FConstr<'a, 'b>, FConstr<'a, 'b>),
+         &'b Constr, Subs<'id, 'a, 'b>),
+  Prod(MRef<'b, (Name, Constr, Constr)>, FConstr<'id, 'a, 'b>, FConstr<'id, 'a, 'b>),
   LetIn(MRef<'b, (Name, Constr, Constr, Constr)>,
-        FConstr<'a, 'b>, FConstr<'a, 'b>, Subs<FConstr<'a, 'b>>),
+        FConstr<'id, 'a, 'b>, FConstr<'id, 'a, 'b>, Subs<'id, 'a, 'b>),
   // should not occur
   // | FEvar of existential_key * fconstr array (* why diff from kernel/closure? *)
   /// FLIFT is a delayed shift; allows sharing between 2 lifted copies
   /// of a given term.
-  Lift(Idx, FConstr<'a, 'b>),
+  Lift(Idx, FConstr<'id, 'a, 'b>),
   /// FCLOS is a delayed substitution applied to a constr
-  Clos(&'b Constr, Subs<FConstr<'a, 'b>>),
+  Clos(&'b Constr, Subs<'id, 'a, 'b>),
   // /// FLOCKED is used to erase the content of a reference that must
   // /// be updated. This is to allow the garbage collector to work
   // /// before the term is computed.
@@ -201,51 +248,45 @@ pub enum FTerm<'a, 'b> where 'b: 'a {
 /// Inst ≡ ! and Shift ≡ ! means the stack is purely applicative.
 /// (NOTE: This might become harder if / when we move away from Vecs, so it's a bit risky to add
 /// this at this stage).
-pub enum StackMember<'a, 'b, Inst, Shft> where 'b: 'a {
-    App(Vec<FConstr<'a, 'b>>),
-    Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'a, 'b>,
-         Vec<FConstr<'a, 'b>>, Inst),
-    CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<FConstr<'a, 'b>>, Inst),
+pub enum StackMember<'id, 'a, 'b, Inst, Shft> where 'b: 'a, 'id: 'a {
+    App(Vec<FConstr<'id, 'a, 'b>>),
+    Case(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, FConstr<'id, 'a, 'b>,
+         Vec<FConstr<'id, 'a, 'b>>, Inst),
+    CaseT(MRef<'b, (CaseInfo, Constr, Constr, Array<Constr>)>, Subs<'id, 'a, 'b>, Inst),
     Proj(usize, usize, &'b Cst, bool, Inst),
-    Fix(FConstr<'a, 'b>, Stack<'a, 'b, Inst, Shft>, Inst),
+    Fix(FConstr<'id, 'a, 'b>, Stack<'id, 'a, 'b, Inst, Shft>, Inst),
     Shift(Idx, Shft),
-    Update(&'a FConstr<'a, 'b>, Inst),
-}
-
-/// A dumbed-down version of Cow that has no requirements on its type parameter.
-/// Used for implementig the immutable version of zip.
-enum SCow<'a, B> where B: 'a {
-    Borrowed(&'a B),
-    Owned(B),
+    Update(&'a FConstr<'id, 'a, 'b>, Inst),
 }
 
 /// A [stack] is a context of arguments, arguments are pushed by
 /// [append_stack] one array at a time but popped with [decomp_stack]
 /// one by one
-pub struct Stack<'a, 'b, Inst, Shft>(Vec<StackMember<'a, 'b, Inst, Shft>>) where 'b: 'a;
+pub struct Stack<'id, 'a, 'b, Inst, Shft>(Vec<StackMember<'id, 'a, 'b, Inst, Shft>>)
+    where 'b: 'a, 'id: 'a;
 
 /// Full stack (all operations are allowed).
-pub type FStack<'a, 'b> = Stack<'a, 'b, (), ()>;
+pub type FStack<'id, 'a, 'b> = Stack<'id, 'a, 'b, (), ()>;
 
 /// Purely applicative stack (only Apps are allowed).
-pub type AStack<'a, 'b> = Stack<'a, 'b, !, !>;
+pub type AStack<'id, 'a, 'b> = Stack<'id, 'a, 'b, !, !>;
 
 /// Applicative + shifts (only Shift and App are allowed).
-pub type SStack<'a, 'b> = Stack<'a, 'b, !, ()>;
+pub type SStack<'id, 'a, 'b> = Stack<'id, 'a, 'b, !, ()>;
 
 /// The result of trying to perform beta reduction.
-enum Application<T> {
+enum Application<'id, 'a, 'b> where 'b: 'a, 'id: 'a {
     /// Arguments are fully applied; this is the corresponding substitution.
-    Full(Subs<T>),
+    Full(Subs<'id, 'a, 'b>),
     /// Arguments are partially applied; this is the corresponding thunk.
-    Partial(T),
+    Partial(FConstr<'id, 'a, 'b>),
 }
 
 /// cache of constants: the body is computed only when needed.
-pub type ClosInfos<'a, 'b> = Infos<'b, FConstr<'a, 'b>>;
+pub type ClosInfos<'id, 'a, 'b> = Infos<'id, 'b, FConstr<'id, 'a, 'b>>;
 
-pub trait IRepr<'a, 'b> {
-    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
+pub trait IRepr<'id, 'a, 'b> {
+    fn i_repr<T>(set: &Set<'id>, c: T, ctx: Context<'id, 'a, 'b>) -> Result<Self, (IdxError, T)>
         where T: Into<&'b Constr> + 'b,
               T: Deref<Target=Constr>,
               Self: Sized;
@@ -263,11 +304,14 @@ impl ::std::convert::From<EnvError> for Box<RedError> {
     }
 }
 
-impl<'a, 'b> Context<'a, 'b> {
-    pub fn new() -> Self {
+impl<'id, 'a, 'b> Context<'id, 'a, 'b> {
+    pub fn new(term_arena: &'a Arena<FTerm<'id, 'a, 'b>>,
+               constr_arena: &'b Arena<Constr>,
+               fconstr_arena: &'a Arena<FConstr<'id, 'a, 'b>>) -> Self {
         Context {
-            // (8 * 2^20, just an arbitrary number to start with).
-            term_arena: Arena::with_capacity(0x800000),
+            term_arena: term_arena,
+            constr_arena: constr_arena,
+            fconstr_arena: fconstr_arena,
         }
     }
 }
@@ -291,8 +335,8 @@ impl<'a, B> Deref for SCow<'a, B>
 
     fn deref(&self) -> &B {
         match *self {
-            SCow::Borrowed(borrowed) => borrowed,
-            SCow::Owned(ref owned) => owned,
+            Cow::Borrowed(borrowed) => borrowed,
+            Cow::Owned(ref owned) => owned,
         }
     }
 }
@@ -309,7 +353,7 @@ impl<'b> PartialEq for TableKeyC<'b> {
             (TableKey::ConstKey(o1), TableKey::ConstKey(o2)) => {
                 let PUniverses(ref c1, ref u1) = **o1;
                 let PUniverses(ref c2, ref u2) = **o2;
-                c1.user_equal(c2) && u1 == u2
+                KnUser(c1) == KnUser(c2) && u1.equal(u2)
             },
             (TableKey::RelKey(i1), TableKey::RelKey(i2)) => i1 == i2,
             (_, _) => false,
@@ -317,27 +361,49 @@ impl<'b> PartialEq for TableKeyC<'b> {
     }
 }
 
-impl<'a, 'b> IRepr<'a, 'b> for FConstr<'a, 'b> {
-    fn i_repr<T>(c: T, ctx: &'a Context<'a, 'b>) -> Result<Self, (IdxError, T)>
+impl<'b> Eq for TableKeyC<'b>  {}
+
+impl<'b> Hash for TableKeyC<'b> {
+    fn hash<H>(&self, state: &mut H) where H: Hasher {
+        match *self {
+            TableKey::ConstKey(o) => {
+                let PUniverses(ref c, ref u) = **o;
+                state.write_u64(1);
+                KnUser(c).hash(state);
+                u.hash(state);
+            },
+            TableKey::RelKey(i) => {
+                state.write_u64(2);
+                i.hash(state);
+            }
+        }
+    }
+}
+
+impl<'id, 'a, 'b> IRepr<'id, 'a, 'b> for FConstr<'id, 'a, 'b> {
+    fn i_repr<T>(set: &Set<'id>, c: T, ctx: Context<'id, 'a, 'b>) -> Result<Self, (IdxError, T)>
         where T: Into<&'b Constr> + 'b,
               T: Deref<Target=Constr>,
     {
         let env = Subs::id(None);
-        env.mk_clos_raw(c, ctx)
+        env.mk_clos_raw(set, c, ctx)
     }
 }
 
-impl<'a, 'b, T> Infos<'b, T> where T: IRepr<'a, 'b> {
-    pub fn ref_value_cache<'r, 'g>(&'r mut self, globals: &'r mut Globals<'g>, rf: TableKeyC<'b>,
-                                   ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>>
+impl<'id, 'a, 'b, T> Infos<'id, 'b, T> where T: IRepr<'id, 'a, 'b> {
+    fn ref_value_cache<'r, 'g>(set: &Set<'id>,
+                               rels: &'r mut (u32, VecMap<&'b mut Constr>),
+                               tab: &'r mut KeyTable<'b, T>,
+                               globals: &'r Globals<'g>, rf: TableKeyC<'b>,
+                               ctx: Context<'id, 'a, 'b>) -> IdxResult<Option<&'r T>>
             where 'g: 'b
     {
-        Ok(Some(match self.tab.entry(rf) {
+        Ok(Some(match tab.entry(rf) {
             hash_map::Entry::Occupied(o) => o.into_mut(),
             hash_map::Entry::Vacant(v) => {
                 match rf {
                     TableKey::RelKey(n) => {
-                        let (s, ref mut l) = self.rels;
+                        let (s, ref mut l) = *rels;
                         if let Some(i) = s.checked_sub(u32::from(n)) {
                             // i is potentially valid, meaning u32 (note that n is a length, not an
                             // Idx, so 0 is a valid index; also note that since n was a positive
@@ -377,7 +443,7 @@ impl<'a, 'b, T> Infos<'b, T> where T: IRepr<'a, 'b> {
                             // in practice), there is actually a chance that i_repr panics
                             // here.  To be on the safe side, maybe we should catch_panic
                             // here (which take_mut would also do for safety reasons).
-                            match T::i_repr(body, ctx) {
+                            match T::i_repr(&set, body, ctx) {
                                 Ok(c) => v.insert(c),
                                 Err((e, body)) => {
                                     mem::replace(body, old);
@@ -396,7 +462,21 @@ impl<'a, 'b, T> Infos<'b, T> where T: IRepr<'a, 'b> {
                     // | VarKey(id) => raise Not_found
                     TableKey::ConstKey(cst) => {
                         if let Some(Ok(body)) = globals.constant_value(cst) {
-                            v.insert(T::i_repr(body, ctx).map_err( |(e, _)| e)?)
+                            let body = match body {
+                                RustCow::Borrowed(b) => b,
+                                RustCow::Owned(b) => {
+                                    // Sometimes we get an owned value back (due to, e.g., universe
+                                    // polymorphism), so we need to allocate it in our constr arena.
+                                    // This is very unfortunate, but I'm not sure I see a good way
+                                    // around something like this; it seems like making *all*
+                                    // Constr references be Cow would be overkill, for example.
+                                    // We could also share the Constr arena and cache further, since
+                                    // the values in it only depend on the input parameters, but that
+                                    // would probably limit parallelism.
+                                    ctx.constr_arena.alloc(b)
+                                },
+                            };
+                            v.insert(T::i_repr(&set, body, ctx).map_err( |(e, _)| e)?)
                         } else {
                             // We either encountered a lookup error, or cst was not an
                             // evaluable constant; in either case, we can't return a body.
@@ -408,11 +488,15 @@ impl<'a, 'b, T> Infos<'b, T> where T: IRepr<'a, 'b> {
         }))
     }
 
-    pub fn unfold_reference<'r, 'g>(&'r mut self, globals: &'r mut Globals<'g>, rf: TableKeyC<'b>,
-                                    ctx: &'a Context<'a, 'b>) -> IdxResult<Option<&'r T>>
+    pub fn unfold_reference<'r, 'g>(&'r mut self,
+                                    globals: &'r Globals<'g>, rf: TableKeyC<'b>,
+                                    ctx: Context<'id, 'a, 'b>) ->
+        IdxResult<Option<(&'r mut Set<'id>, &'r T)>>
         where 'g: 'b,
     {
-        self.ref_value_cache(globals, rf, ctx)
+        let Infos { ref mut set, ref mut rels, ref mut tab, .. } = *self;
+        let res = Self::ref_value_cache(set, rels, tab, globals, rf, ctx)?;
+        Ok(res.map( |res| (set, res) ))
     }
 }
 
@@ -428,27 +512,39 @@ impl RedState {
     }
 }
 
-impl<'a, 'b> FConstr<'a, 'b> {
-    pub fn fterm(&self) -> Option<&'a FTerm<'a, 'b>> {
-        self.term.get()
+pub fn clone_vec<'id, 'a, 'b>(v: &[FConstr<'id, 'a, 'b>],
+                              set: &Set<'id>) -> Vec<FConstr<'id, 'a, 'b>> {
+    v.iter().map( |x| x.clone(set) ).collect()
+}
+
+impl<'id, 'a, 'b> FConstr<'id, 'a, 'b> {
+    pub fn clone(&self, set: &Set<'id>) -> Self {
+        FConstr {
+            norm: self.norm.clone(set),
+            term: self.term.clone(set),
+        }
     }
 
-    fn set_norm(&self) {
-        self.norm.set(RedState::Norm)
+    pub fn fterm(&self, set: &Set<'id>) -> Option<&'a FTerm<'id, 'a, 'b>> {
+        *set.get(&self.term)
     }
 
-    fn update(&self, no: RedState, term: Option<&'a FTerm<'a, 'b>>) {
+    fn set_norm(&self, set: &mut Set<'id>) {
+        *set.get_mut(&self.norm) = RedState::Norm;
+    }
+
+    fn update(&self, set: &mut Set<'id>, no: RedState, term: Option<&'a FTerm<'id, 'a, 'b>>) {
         // Could issue a warning if no is still Red, pointing out that we lose sharing.
-        self.norm.set(no);
-        self.term.set(term);
+        *set.get_mut(&self.norm) = no;
+        *set.get_mut(&self.term) = term;
     }
 
-    fn lft(&self, mut n: Idx, ctx: &'a Context<'a, 'b>) -> IdxResult<Self> {
+    fn lft(&self, set: &Set<'id>, mut n: Idx, ctx: Context<'id, 'a, 'b>) -> IdxResult<Self> {
         let mut ft = self;
         loop {
-            match *ft.fterm().expect("Tried to lift a locked term") {
+            match *ft.fterm(set).expect("Tried to lift a locked term") {
                 FTerm::Ind(_) | FTerm::Construct(_)
-                | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => return Ok(ft.clone()),
+                | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => return Ok(ft.clone(set)),
                 FTerm::Rel(i) => return Ok(FConstr {
                     norm: Cell::new(RedState::Norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(i.checked_add(n)?)))),
@@ -484,36 +580,37 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     ft = m;
                 },
                 _ => return Ok(FConstr {
-                    norm: ft.norm.clone(),
-                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Lift(n, ft.clone())))),
+                    norm: ft.norm.clone(set),
+                    term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Lift(n, ft.clone(set))))),
                 })
             }
         }
     }
 
     /// Lifting specialized to the case where n = 0.
-    fn lft0(&self, ctx: &'a Context<'a, 'b>) -> IdxResult<Self> {
-        match *self.fterm().expect("Tried to lift a locked term") {
+    fn lft0(&self, set: &Set<'id>, ctx: Context<'id, 'a, 'b>) -> IdxResult<Self> {
+        match *self.fterm(set).expect("Tried to lift a locked term") {
             FTerm::Ind(_) | FTerm::Construct(_)
-            | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => Ok(self.clone()),
+            | FTerm::Flex(TableKey::ConstKey(_)/* | VarKey _*/) => Ok(self.clone(set)),
             FTerm::Rel(_) => Ok(FConstr {
                 norm: Cell::new(RedState::Norm),
-                term: self.term.clone(),
+                term: self.term.clone(set),
             }),
             FTerm::Lambda(_, _, _) | FTerm::Fix(_, _, _) | FTerm::CoFix(_, _, _) => Ok(FConstr {
                 norm: Cell::new(RedState::Cstr),
-                term: self.term.clone(),
+                term: self.term.clone(set),
             }),
-            FTerm::Lift(k, ref m) => m.lft(k, ctx),
-            _ => Ok(self.clone())
+            FTerm::Lift(k, ref m) => m.lft(set, k, ctx),
+            _ => Ok(self.clone(set))
         }
     }
 
     /// The inverse of mk_clos_deep: move back to constr
     /// Note: self must be typechecked beforehand!
-    fn to_constr<F>(&self, constr_fun: F, lfts: &Lift,
-                    ctx: &'a Context<'a, 'b>) -> IdxResult<Constr>
-        where F: Fn(&FConstr<'a, 'b>, &Lift, &'a Context<'a, 'b>) -> IdxResult<Constr>,
+    fn to_constr<F>(&self, set: &mut Set<'id>, constr_fun: F, lfts: &Lift,
+                    ctx: Context<'id, 'a, 'b>) -> IdxResult<Constr>
+        where F: Fn(&FConstr<'id, 'a, 'b>, &mut Set<'id>,
+                    &Lift, Context<'id, 'a, 'b>) -> IdxResult<Constr>,
     {
         // FIXME: The constant cloning of lfts can likely be replaced by a slightly different API
         // where lfts is taken mutably, and added shifts or lifts can be pushed for a scope, then
@@ -523,10 +620,10 @@ impl<'a, 'b> FConstr<'a, 'b> {
         // that doesn't require mutual recursion.
         /* let mut norm_ = self.norm.get();
         let mut term_ = Cow::Borrowed(self.fterm().expect("Tried to lift a locked term!"));*/
-        let mut lfts = Cow::Borrowed(lfts);
+        let mut lfts = RustCow::Borrowed(lfts);
         let mut v = self;
         loop {
-            match *v.fterm().expect("Tried to lift a locked term!") {
+            match *v.fterm(set).expect("Tried to lift a locked term!") {
                 FTerm::Rel(i) => return Ok(Constr::Rel(i32::from(lfts.reloc_rel(i)?) as i64)),
                 FTerm::Flex(TableKey::RelKey(i)) =>
                     return Ok(Constr::Rel(i32::from(lfts.reloc_rel(i)?) as i64)),
@@ -539,23 +636,23 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     return c.exliftn(&lfts)
                 },
                 FTerm::Cast(ref a, k, ref b) => {
-                    let a = constr_fun(a, &lfts, ctx)?;
-                    let b = constr_fun(b, &lfts, ctx)?;
-                    return Ok(Constr::Cast(ORef(Rc::from((a, k.1, b)))))
+                    let a = constr_fun(a, set, &lfts, ctx)?;
+                    let b = constr_fun(b, set, &lfts, ctx)?;
+                    return Ok(Constr::Cast(ORef(Arc::from((a, k.1, b)))))
                 },
                 FTerm::Flex(TableKey::ConstKey(c)) => return Ok(Constr::Const(c.clone())),
                 FTerm::Ind(op) => return Ok(Constr::Ind(op.clone())),
                 FTerm::Construct(op) => return Ok(Constr::Construct(op.clone())),
                 FTerm::Case(ci, ref p, ref c, ref ve) => {
                     let (ref ci, _, _, _) = **ci;
-                    let p = constr_fun(p, &lfts, ctx)?;
-                    let c = constr_fun(c, &lfts, ctx)?;
+                    let p = constr_fun(p, set, &lfts, ctx)?;
+                    let c = constr_fun(c, set, &lfts, ctx)?;
                     // expensive -- allocates a Vec
                     let ve: Result<Vec<_>, _> = ve.iter()
-                        .map( |v| constr_fun(v, &lfts, ctx) )
+                        .map( |v| constr_fun(v, set, &lfts, ctx) )
                         .collect();
-                    return Ok(Constr::Case(ORef(Rc::from((ci.clone(), p, c,
-                                                          Array(Rc::from(ve?)))))))
+                    return Ok(Constr::Case(ORef(Arc::from((ci.clone(), p, c,
+                                                           Array(Arc::from(ve?)))))))
                 },
                 FTerm::CaseT(ci, ref c, ref e) => {
                     /*
@@ -569,16 +666,18 @@ impl<'a, 'b> FConstr<'a, 'b> {
                                                   e.mk_clos_vect(&ve, ctx)? /* expensive */));
                     */
                     let (ref ci, ref p, _, ref ve) = **ci;
-                    let p = e.mk_clos2(p, ctx)?;
-                    let p = constr_fun(&p, &lfts, ctx)?;
-                    let c = constr_fun(c, &lfts, ctx)?;
+                    let p = e.mk_clos2(set, p, ctx)?;
+                    let p = constr_fun(&p, set, &lfts, ctx)?;
+                    let c = constr_fun(c, set, &lfts, ctx)?;
                     // expensive -- allocates a Vec
                     let ve: Result<Vec<_>, _> = ve.iter()
-                        .map( |t: &'b Constr| e.mk_clos(t, ctx))
-                        .map( |v| constr_fun(&v?, &lfts, ctx) )
+                        .map( |t: &'b Constr| {
+                            let v = e.mk_clos(set, t, ctx);
+                            constr_fun(&v?, set, &lfts, ctx)
+                        })
                         .collect();
-                    return Ok(Constr::Case(ORef(Rc::from((ci.clone(), p, c,
-                                                          Array(Rc::from(ve?)))))))
+                    return Ok(Constr::Case(ORef(Arc::from((ci.clone(), p, c,
+                                                           Array(Arc::from(ve?)))))))
                 },
                 FTerm::Fix(o, i, ref e) => {
                     // FIXME: The recursion here seems like it potentially wastes a lot of work
@@ -589,8 +688,10 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     let Fix(Fix2(ref reci, _), PRec(ref lna, ref tys, ref bds)) = **o;
                     // expensive, makes a Vec
                     let ftys: Result<Vec<_>, _> = tys.iter()
-                        .map( |t| e.mk_clos(t, ctx))
-                        .map( |t| constr_fun(&t?, &lfts, ctx))
+                        .map( |t| {
+                            let t = e.mk_clos(set, t, ctx);
+                            constr_fun(&t?, set, &lfts, ctx)
+                        })
                         .collect();
                     // Note: I believe the length should always be nonzero here, but I'm not 100%
                     // sure.  For now, we separate the two cases to avoid failing outright in the
@@ -607,14 +708,18 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         let mut lfts = lfts.into_owned();
                         lfts.liftn(n)?;
                         bds.iter()
-                           .map( |t| e.mk_clos(t, ctx))
-                           .map( |t| constr_fun(&t?, &lfts, ctx))
+                           .map( |t| {
+                                let t = e.mk_clos(set, t, ctx);
+                                constr_fun(&t?, set, &lfts, ctx)
+                           })
                            .collect()
                     } else {
                         // expensive, makes a Vec
                         bds.iter()
-                           .map( |t| e.mk_clos(t, ctx))
-                           .map( |t| constr_fun(&t?, &lfts, ctx))
+                           .map( |t| {
+                               let t = e.mk_clos(set, t, ctx);
+                               constr_fun(&t?, set, &lfts, ctx)
+                           })
                            .collect()
                     };
                     // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
@@ -624,17 +729,19 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
                     // be determined is whether isize is always guaranteed to fit in an i64.  If
                     // that's true, this cast necessarily succeeds.
-                    return Ok(Constr::Fix(ORef(Rc::from(Fix(Fix2(reci.clone(), i as i64),
-                                                            PRec(lna.clone(),
-                                                                 Array(Rc::new(ftys?)),
-                                                                 Array(Rc::new(fbds?))))))))
+                    return Ok(Constr::Fix(ORef(Arc::from(Fix(Fix2(reci.clone(), i as i64),
+                                                             PRec(lna.clone(),
+                                                                  Array(Arc::new(ftys?)),
+                                                                  Array(Arc::new(fbds?))))))))
                 },
                 FTerm::CoFix(o, i, ref e) => {
                     let CoFix(_, PRec(ref lna, ref tys, ref bds)) = **o;
                     // expensive, makes a Vec
                     let ftys: Result<Vec<_>, _> = tys.iter()
-                        .map( |t| e.mk_clos(t, ctx))
-                        .map( |t| constr_fun(&t?, &lfts, ctx))
+                        .map( |t| {
+                            let t = e.mk_clos(set, t, ctx);
+                            constr_fun(&t?, set, &lfts, ctx)
+                        })
                         .collect();
                     // expensive, makes a Vec
                     let fbds: Result<Vec<_>, _> = if let Some(n) = NonZero::new(bds.len()) {
@@ -645,14 +752,18 @@ impl<'a, 'b> FConstr<'a, 'b> {
                         let mut lfts = lfts.into_owned();
                         lfts.liftn(n)?;
                         bds.iter()
-                           .map( |t| e.mk_clos(t, ctx))
-                           .map( |t| constr_fun(&t?, &lfts, ctx))
+                           .map( |t| {
+                               let t = e.mk_clos(set, t, ctx);
+                                constr_fun(&t?, set, &lfts, ctx)
+                           })
                            .collect()
                     } else {
                         // expensive, makes a Vec
                         bds.iter()
-                           .map( |t| e.mk_clos(t, ctx))
-                           .map( |t| constr_fun(&t?, &lfts, ctx))
+                           .map( |t| {
+                               let t = e.mk_clos(set, t, ctx);
+                               constr_fun(&t?, set, &lfts, ctx)
+                           })
                            .collect()
                     };
                     // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
@@ -662,22 +773,22 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
                     // be determined is whether isize is always guaranteed to fit in an i64.  If
                     // that's true, this cast necessarily succeeds.
-                    return Ok(Constr::CoFix(ORef(Rc::from(CoFix(i as i64,
-                                                                PRec(lna.clone(),
-                                                                     Array(Rc::new(ftys?)),
-                                                                     Array(Rc::new(fbds?))))))))
+                    return Ok(Constr::CoFix(ORef(Arc::from(CoFix(i as i64,
+                                                                 PRec(lna.clone(),
+                                                                      Array(Arc::new(ftys?)),
+                                                                      Array(Arc::new(fbds?))))))))
                 },
                 FTerm::App(ref f, ref ve) => {
-                    let f = constr_fun(f, &lfts, ctx)?;
+                    let f = constr_fun(f, set, &lfts, ctx)?;
                     // expensive -- allocates a Vec
                     let ve: Result<Vec<_>, _> = ve.iter()
-                        .map( |v| constr_fun(v, &lfts, ctx) )
+                        .map( |v| constr_fun(v, set, &lfts, ctx) )
                         .collect();
-                    return Ok(Constr::App(ORef(Rc::from((f, Array(Rc::from(ve?)))))))
+                    return Ok(Constr::App(ORef(Arc::from((f, Array(Arc::from(ve?)))))))
                 },
                 FTerm::Proj(p, b, ref c) => {
-                    let c = constr_fun(c, &lfts, ctx)?;
-                    return Ok(Constr::Proj(ORef(Rc::from((Proj(p.clone(), b), c)))))
+                    let c = constr_fun(c, set, &lfts, ctx)?;
+                    return Ok(Constr::Proj(ORef(Arc::from((Proj(p.clone(), b), c)))))
                 },
                 FTerm::Lambda(ref tys, b, ref e) => {
                     // We should know v is nonzero, if Lambda was created properly.
@@ -694,53 +805,55 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     // the most obvious, since dest_flambda only needs to slice into the array (of
                     // course, because of this maybe dest_flambda isn't even needed here).
                     let (na, ty, bd) =
-                        FTerm::dest_flambda(Subs::mk_clos2, tys, b, e, ctx)?;
-                    let ty = constr_fun(&ty, &lfts, ctx)?;
+                        FTerm::dest_flambda(set, Subs::mk_clos2, tys, b, e, ctx)?;
+                    let ty = constr_fun(&ty, set, &lfts, ctx)?;
                     // expensive, but shouldn't outlive this block.
                     let mut lfts = lfts.into_owned();
                     lfts.lift()?;
-                    let bd = constr_fun(&bd, &lfts, ctx)?;
-                    return Ok(Constr::Lambda(ORef(Rc::from((na, ty, bd)))))
+                    let bd = constr_fun(&bd, set, &lfts, ctx)?;
+                    return Ok(Constr::Lambda(ORef(Arc::from((na, ty, bd)))))
                 },
                 FTerm::Prod(o, ref t, ref c) => {
                     let (ref n, _, _) = **o;
-                    let t = constr_fun(t, &lfts, ctx)?;
+                    let t = constr_fun(t, set, &lfts, ctx)?;
                     // expensive, but shouldn't outlive this block.
                     let mut lfts = lfts.into_owned();
                     lfts.lift()?;
-                    let c = constr_fun(c, &lfts, ctx)?;
-                    return Ok(Constr::Prod(ORef(Rc::from((n.clone(), t, c)))))
+                    let c = constr_fun(c, set, &lfts, ctx)?;
+                    return Ok(Constr::Prod(ORef(Arc::from((n.clone(), t, c)))))
                 },
                 FTerm::LetIn(o, ref b, ref t, ref e) => {
                     let (ref n, _, _, ref f) = **o;
-                    let b = constr_fun(b, &lfts, ctx)?;
-                    let t = constr_fun(t, &lfts, ctx)?;
+                    let b = constr_fun(b, set, &lfts, ctx)?;
+                    let t = constr_fun(t, set, &lfts, ctx)?;
                     let mut e = e.clone(); // expensive, but shouldn't outlive this block.
                     e.lift()?;
-                    let fc = e.mk_clos2(f, ctx)?;
+                    let fc = e.mk_clos2(set, f, ctx)?;
                     // expensive, but shouldn't outlive this block.
                     let mut lfts = lfts.into_owned();
                     lfts.lift()?;
-                    let fc = constr_fun(&fc, &lfts, ctx)?;
-                    return Ok(Constr::LetIn(ORef(Rc::from((n.clone(), b, t, fc)))))
+                    let fc = constr_fun(&fc, set, &lfts, ctx)?;
+                    return Ok(Constr::LetIn(ORef(Arc::from((n.clone(), b, t, fc)))))
                 },
                 // | FEvar (ev,args) -> Evar(ev,Array.map (constr_fun lfts) args)
                 FTerm::Lift(k, ref a) => {
                     // expensive
                     let mut lfts_ = lfts.into_owned();
                     lfts_.shift(k)?;
-                    lfts = Cow::Owned(lfts_);
+                    lfts = RustCow::Owned(lfts_);
                     // norm_ = a.norm.get();
                     // term_ = Cow::Borrowed(a.fterm().expect("Tried to lift a locked term!"));
                     v = a;
                 },
                 FTerm::Clos(t, ref env) => {
-                    let fr = env.mk_clos2(t, ctx)?;
+                    let fr = env.mk_clos2(set, t, ctx)?;
                     // TODO: check whether the update here is useful.  If so, we should
                     // slightly change the function definition.
                     // norm_ = ...
-                    // let a = constr_fun(a, &lfts, ctx)?;
-                    v.update(fr.norm.get(), fr.term.get());
+                    // let a = constr_fun(a, set, &lfts, ctx)?;
+                    let norm = *set.get(&fr.norm);
+                    let term = *set.get(&fr.term);
+                    v.update(set, norm, term);
                 }
             }
         }
@@ -749,39 +862,40 @@ impl<'a, 'b> FConstr<'a, 'b> {
     /// Zip a single item; shared between zip and zip_mut.
     ///
     /// f is the function used to perform the append in the App case.
-    fn zip_item_mut<'r, I, S, F>(m: Cow<'r, Self>, s: StackMember<'a, 'b, I, S>,
-                                 ctx: &'a Context<'a, 'b>,
-                                 f: F) -> IdxResult<Cow<'r, Self>>
-        where F: FnOnce(Vec<Self>, Stack<'a, 'b, I, S>),
+    fn zip_item_mut<'r, I, S, F>(m: SCow<'r, Self>, set: &mut Set<'id>,
+                                 s: StackMember<'id, 'a, 'b, I, S>,
+                                 ctx: Context<'id, 'a, 'b>,
+                                 f: F) -> IdxResult<SCow<'r, Self>>
+        where F: FnOnce(&Set<'id>, Vec<Self>, Stack<'id, 'a, 'b, I, S>),
     {
         match s {
             StackMember::App(args) => {
-                let norm = m.norm.get().neutr();
-                let t = FTerm::App(m.into_owned(), args);
+                let norm = set.get(&m.norm).neutr();
+                let t = FTerm::App(m.clone(set), args);
                 Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
                 }))
             },
             StackMember::Case(o, p, br, _) => {
-                let norm = m.norm.get().neutr();
-                let t = FTerm::Case(o, p, m.into_owned(), br);
+                let norm = set.get(&m.norm).neutr();
+                let t = FTerm::Case(o, p, m.clone(set), br);
                 Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
                 }))
             },
             StackMember::CaseT(o, e, _) => {
-                let norm = m.norm.get().neutr();
-                let t = FTerm::CaseT(o, m.into_owned(), e);
+                let norm = set.get(&m.norm).neutr();
+                let t = FTerm::CaseT(o, m.clone(set), e);
                 Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
                 }))
             },
             StackMember::Proj(_, _, p, b, _) => {
-                let norm = m.norm.get().neutr();
-                let t = FTerm::Proj(p, b, m.into_owned());
+                let norm = set.get(&m.norm).neutr();
+                let t = FTerm::Proj(p, b, m.clone(set));
                 Ok(Cow::Owned(FConstr {
                     norm: Cell::new(norm),
                     term: Cell::new(Some(ctx.term_arena.alloc(t))),
@@ -789,15 +903,17 @@ impl<'a, 'b> FConstr<'a, 'b> {
             },
             StackMember::Fix(fx, par, _) => {
                 // FIXME: This seems like a very weird and convoluted way to do this.
-                let mut v = vec![m.into_owned()];
-                f(v, par);
+                let mut v = vec![m.clone(set)];
+                f(set, v, par);
                 Ok(Cow::Owned(fx))
             },
             StackMember::Shift(n, _) => {
-                Ok(Cow::Owned(m.lft(n, ctx)?))
+                Ok(Cow::Owned(m.lft(set, n, ctx)?))
             },
             StackMember::Update(rf, _) => {
-                rf.update(m.norm.get(), m.term.get());
+                let norm = *set.get(&m.norm);
+                let term = *set.get(&m.term);
+                rf.update(set, norm, term);
                 // TODO: The below is closer to the OCaml implementation, but it doesn't seem
                 // like there's any point in doing it, since we never update m anyway (we do
                 // return it at the end, but we're currently returning an owned FTerm rather
@@ -810,11 +926,11 @@ impl<'a, 'b> FConstr<'a, 'b> {
 
     /// This differs from the OCaml because it acutally mutates its stk argument.  Fortunately,
     /// this only matters in one place (whd_stack)--see below.
-    fn zip_mut<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
-                     ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
+    fn zip_mut<I, S>(&self, set: &mut Set<'id>, stk: &mut Stack<'id, 'a, 'b, I, S>,
+                     ctx: Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>> {
         let mut m = Cow::Borrowed(self);
         while let Some(s) = stk.pop() {
-            m = Self::zip_item_mut(m, s, ctx, |v, par| {
+            m = Self::zip_item_mut(m, set, s, ctx, |_, v, par| {
                 stk.append(v);
                 // mem::swap(stk, &mut par);
                 // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
@@ -824,26 +940,26 @@ impl<'a, 'b> FConstr<'a, 'b> {
                 stk.extend(par.0.into_iter());
             })?;
         }
-        Ok(m.into_owned())
+        Ok(m.clone(set))
     }
 
     /// This differs from the OCaml because it actually mutates its stk argument.  Fortunately, in
     /// all but one place, this doesn't matter, because we end up not using the stack afterwards
     /// anyway.  The one place, sadly, is whd_stack, which is called all the time, so optimizing
     /// that case separately might be a good idea.
-    fn fapp_stack_mut<I, S>(&self, stk: &mut Stack<'a, 'b, I, S>,
-                            ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
-        self.zip_mut(stk, ctx)
+    fn fapp_stack_mut<I, S>(&self, set: &mut Set<'id>, stk: &mut Stack<'id, 'a, 'b, I, S>,
+                            ctx: Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>> {
+        self.zip_mut(set, stk, ctx)
     }
 
     /// The immutable version of zip.  Doesn't return a value, since it's only used by whd_stack to
     /// apply update marks.
-    fn zip<I, S>(&self, stk: &Stack<'a, 'b, I, S>,
-                 ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
+    fn zip<I, S>(&self, set: &mut Set<'id>, stk: &Stack<'id, 'a, 'b, I, S>,
+                 ctx: Context<'id, 'a, 'b>) -> IdxResult<()> {
         let stk = stk.iter();
-        let mut bstk = Vec::new(); // the stack, m, and s outlive bstk
+        let mut bstk: Vec<SCow<_>> = Vec::new(); // the stack, m, and s outlive bstk
         let mut m = Cow::Borrowed(self); // the stack and s outlive m
-        // We use a Vec of SCows of StackMembers rather than a normal stack.  The reason is that
+        // We use a Vec of Cows of StackMembers rather than a normal stack.  The reason is that
         // normal stacks own their items, and some operations (like append) require mutability
         // in order to function.  Rather than write a specialized version of Stack that works
         // within these restrictions, we just use the Vec directly and inline specialized versions
@@ -853,22 +969,22 @@ impl<'a, 'b> FConstr<'a, 'b> {
         // the stack again, and not being allowed to clone stacks normally is a nice lint, but
         // that honestly might be less work; maybe we should just do that instead.
         //
-        // Also note that we use SCow over regular Cow because regular Cow requires there to be an
+        // Also note that we use Cow over regular Cow because regular Cow requires there to be an
         // easy way to turn an immutable version into an owned one, which we don't actually have in
         // general (we only sort of provide an implementation for Apps).
         for s_ in stk {
-            let mut s_ = SCow::Borrowed(s_);
+            let mut s_ = Cow::Borrowed(s_);
             loop {
                 // Manual copy of append designed for our weird Cow stacks.
-                let append = |bstk: &mut Vec<_>, mut v: Vec<_>| {
+                let append = |set: &Set<'id>, bstk: &mut Vec<_>, mut v: Vec<_>| {
                     if let Some(o) = bstk.last_mut() {
                         match *o {
-                            SCow::Borrowed(&StackMember::App(ref l)) => {
-                                v.extend(l.iter().map( |v| v.clone() ));
-                                *o = SCow::Owned(StackMember::App(v));
+                            Cow::Borrowed(&StackMember::App(ref l)) => {
+                                v.extend(l.iter().map( |v| v.clone(set) ));
+                                *o = Cow::Owned(StackMember::App(v));
                                 return;
                             },
-                            SCow::Owned(StackMember::App(ref mut l)) => {
+                            Cow::Owned(StackMember::App(ref mut l)) => {
                                 mem::swap(&mut v, l);
                                 l.extend(v.into_iter());
                                 return;
@@ -876,25 +992,25 @@ impl<'a, 'b> FConstr<'a, 'b> {
                             _ => {},
                         }
                     }
-                    bstk.push(SCow::Owned(StackMember::App(v)))
+                    bstk.push(Cow::Owned(StackMember::App(v)))
                 };
                 // First, check whether we can get away (almost) with the mutable case.
                 let s = match s_ {
-                    SCow::Borrowed(s) => s,
-                    SCow::Owned(s) => {
+                    Cow::Borrowed(s) => s,
+                    Cow::Owned(s) => {
                         // In the owned case, we can just treat this like we do for regular mutable
                         // stacks, except for the append case (which needs to be different to deal
                         // with our weird Cow stack).  Actually, the append case is the only case
                         // we should ever see here, but it might be annoying to convince Rust's
                         // type system of that, and anyway it wouldn't save us much code.
-                        m = Self::zip_item_mut(m, s, ctx, |v, par| {
-                            append(&mut bstk, v);
+                        m = Self::zip_item_mut(m, set, s, ctx, |set, v, par| {
+                            append(set, &mut bstk, v);
                             // mem::swap(stk, &mut par);
                             // NOTE: Since we use a Vec rather than a list, the "head" of our
                             // stack is actually at the end of the Vec.  Therefore, where in the
                             // OCaml we perform par @ stk, here we have reversed par and reversed
                             // stk, and perform stk ++ par (or kst ++ rap).
-                            bstk.extend(par.0.into_iter().map(SCow::Owned));
+                            bstk.extend(par.0.into_iter().map(Cow::Owned));
                         })?;
                         // Continue the loop only if we added some elements to the head of the
                         // stack (a fixpoint does this).
@@ -905,33 +1021,33 @@ impl<'a, 'b> FConstr<'a, 'b> {
                 // mutable case, except that we clone instead of moving.
                 match *s {
                     StackMember::App(ref args) => {
-                        let norm = m.norm.get().neutr();
-                        let t = FTerm::App(m.into_owned(), args.clone() /* expensive */);
+                        let norm = set.get(&m.norm).neutr();
+                        let t = FTerm::App(m.clone(set), clone_vec(args, set) /* expensive */);
                         m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
                         });
                     },
                     StackMember::Case(o, ref p, ref br, _) => {
-                        let norm = m.norm.get().neutr();
-                        let t = FTerm::Case(o, p.clone(), m.into_owned(),
-                                            br.clone() /* expensive */);
+                        let norm = set.get(&m.norm).neutr();
+                        let t = FTerm::Case(o, p.clone(set), m.clone(set),
+                                            clone_vec(br, set) /* expensive */);
                         m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
                         });
                     },
                     StackMember::CaseT(o, ref e, _) => {
-                        let norm = m.norm.get().neutr();
-                        let t = FTerm::CaseT(o, m.into_owned(), e.clone() /* expensive */);
+                        let norm = set.get(&m.norm).neutr();
+                        let t = FTerm::CaseT(o, m.clone(set), e.clone() /* expensive */);
                         m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
                         });
                     },
                     StackMember::Proj(_, _, p, ref b, _) => {
-                        let norm = m.norm.get().neutr();
-                        let t = FTerm::Proj(p, b.clone(), m.into_owned());
+                        let norm = set.get(&m.norm).neutr();
+                        let t = FTerm::Proj(p, b.clone(), m.clone(set));
                         m = Cow::Owned(FConstr {
                             norm: Cell::new(norm),
                             term: Cell::new(Some(ctx.term_arena.alloc(t))),
@@ -939,21 +1055,23 @@ impl<'a, 'b> FConstr<'a, 'b> {
                     },
                     StackMember::Fix(ref fx, ref par, _) => {
                         // FIXME: This seems like a very weird and convoluted way to do this.
-                        let mut v = vec![m.into_owned()];
+                        let mut v = vec![m.clone(set)];
                         m = Cow::Borrowed(fx);
-                        append(&mut bstk, v);
+                        append(set, &mut bstk, v);
                         // mem::swap(stk, &mut par);
                         // NOTE: Since we use a Vec rather than a list, the "head" of our stack is
                         // actually at the end of the Vec.  Therefore, where in the OCaml we
                         // perform par @ stk, here we have reversed par and reversed stk, and
                         // perform stk ++ par (or kst ++ rap).
-                        bstk.extend(par.0.iter().map(SCow::Borrowed));
+                        bstk.extend(par.0.iter().map(Cow::Borrowed));
                     },
                     StackMember::Shift(n, _) => {
-                        m = Cow::Owned(m.lft(n, ctx)?);
+                        m = Cow::Owned(m.lft(set, n, ctx)?);
                     },
                     StackMember::Update(ref rf, _) => {
-                        rf.update(m.norm.get(), m.term.get());
+                        let norm = *set.get(&m.norm);
+                        let term = *set.get(&m.term);
+                        rf.update(set, norm, term);
                         // TODO: The below is closer to the OCaml implementation, but it doesn't
                         // seem like there's any point in doing it, since we never update m anyway.
                         // m = Cow::Borrowed(rf);
@@ -968,9 +1086,9 @@ impl<'a, 'b> FConstr<'a, 'b> {
     }
 
     /// The immutable version of fapp_stack.
-    fn fapp_stack<I, S>(&self, stk: &Stack<'a, 'b, I, S>,
-                            ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
-        self.zip(stk, ctx)
+    fn fapp_stack<I, S>(&self, set: &mut Set<'id>, stk: &Stack<'id, 'a, 'b, I, S>,
+                        ctx: Context<'id, 'a, 'b>) -> IdxResult<()> {
+        self.zip(set, stk, ctx)
     }
 
     /// Initialization and then normalization
@@ -978,20 +1096,21 @@ impl<'a, 'b> FConstr<'a, 'b> {
     /// Weak reduction
     /// [whd_val] is for weak head normalization
     /// Note: self must be typechecked beforehand!
-    pub fn whd_val<'r,'g>(self, info: &mut ClosInfos<'a, 'b>, globals: &mut Globals<'g>,
-                          ctx: &'a Context<'a, 'b>) -> RedResult<Constr>
+    pub fn whd_val<'r,'g>(self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &Globals<'g>,
+                          ctx: Context<'id, 'a, 'b>) -> RedResult<Constr>
             where 'g: 'b,
     {
         let mut stk = Stack(Vec::new());
         let ft = stk.kh(info, globals, self, ctx, (), ())?;
-        Ok(Constr::of_fconstr(&ft, ctx)?)
+        Ok(Constr::of_fconstr(&ft, &mut info.set, ctx)?)
     }
 }
 
-impl<'a, 'b> Subs<FConstr<'a, 'b>> {
-    fn clos_rel(&self, i: Idx, ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
+impl<'id, 'a, 'b> Subs<'id, 'a, 'b> {
+    fn clos_rel(&self, set: &Set<'id>, i: Idx,
+                ctx: Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>> {
         match self.expand_rel(i)? {
-            (n, Expr::Val(mt)) => mt.lft(n, ctx),
+            (n, Expr::Val(mt)) => mt.lft(set, n, ctx),
             (k, Expr::Var(None)) => Ok(FConstr {
                 norm: Cell::new(RedState::Norm),
                 term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Rel(k)))),
@@ -1007,7 +1126,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
                 // expect unnecessary.
                 if let Some(k) = k.checked_sub(p).expect("k-p should always be non-negative!") {
                     // Positive k
-                    v.lft(k, ctx)
+                    v.lft(set, k, ctx)
                 } else {
                     // Zero k.
                     // Don't try to lift, since you don't have anything positive by which to lift.
@@ -1019,7 +1138,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
 
     fn mk_lambda(self,
                  /*t: ORef<(Name, Constr, Constr)>*/
-                 t: &'b Constr) -> IdxResult<FTerm<'a, 'b>> {
+                 t: &'b Constr) -> IdxResult<FTerm<'id, 'a, 'b>> {
         // let t = Constr::Lambda(t);
         let (mut rvars, t_) = t.decompose_lam(); // expensive because it allocates a new vector.
         // We know rvars.len() is nonzero.
@@ -1039,8 +1158,8 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
         Ok(FTerm::Lambda(rvars, t_, self))
     }
 
-    fn mk_clos_raw<T>(&self, t: T,
-                      ctx: &'a Context<'a, 'b>) -> Result<FConstr<'a, 'b>, (IdxError, T)>
+    fn mk_clos_raw<T>(&self, set: &Set<'id>, t: T,
+                      ctx: Context<'id, 'a, 'b>) -> Result<FConstr<'id, 'a, 'b>, (IdxError, T)>
         where T: Into<&'b Constr> + 'b,
               T: Deref<Target=Constr>,
     {
@@ -1053,7 +1172,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
                Ok(i) => i,
                Err(e) => return Err((e, t))
            };
-           return match self.clos_rel(i, ctx) {
+           return match self.clos_rel(set, i, ctx) {
                Err(e) => Err((e, t)),
                Ok(i)  => Ok(i),
            }
@@ -1097,16 +1216,16 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
 
     /// Optimization: do not enclose variables in a closure.
     /// Makes variable access much faster
-    pub fn mk_clos(&self, t: &'b Constr,
-                   ctx: &'a Context<'a, 'b>) -> Result<FConstr<'a, 'b>, IdxError>
+    pub fn mk_clos(&self, set: &Set<'id>, t: &'b Constr,
+                   ctx: Context<'id, 'a, 'b>) -> Result<FConstr<'id, 'a, 'b>, IdxError>
     {
-        self.mk_clos_raw(t, ctx).map_err( |(e, _)| e)
+        self.mk_clos_raw(set, t, ctx).map_err( |(e, _)| e)
     }
 
-    pub fn mk_clos_vect(&self, v: &'b [Constr],
-                        ctx: &'a Context<'a, 'b>) -> IdxResult<Vec<FConstr<'a, 'b>>> {
+    pub fn mk_clos_vect(&self, set: &Set<'id>, v: &'b [Constr],
+                        ctx: Context<'id, 'a, 'b>) -> IdxResult<Vec<FConstr<'id, 'a, 'b>>> {
         // Expensive, makes a vector
-        v.into_iter().map( |t| self.mk_clos(t, ctx)).collect()
+        v.into_iter().map( |t| self.mk_clos(set, t, ctx)).collect()
     }
 
     /// Translate the head constructor of t from constr to fconstr. This
@@ -1114,21 +1233,21 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
     /// subterms.
     /// Could be used insted of mk_clos.
     /// Note: t must be typechecked beforehand!
-    pub fn mk_clos_deep<F>(&self, clos_fun: F, t: &'b Constr,
-                           ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>
-        where F: Fn(&Subs<FConstr<'a, 'b>>,
-                    &'b Constr, &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>,
+    pub fn mk_clos_deep<F>(&self, set: &Set<'id>, clos_fun: F, t: &'b Constr,
+                           ctx: Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>>
+        where F: Fn(&Subs<'id, 'a, 'b>, &Set<'id>,
+                    &'b Constr, Context<'id,'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>>,
     {
         match *t {
             Constr::Rel(_) | Constr::Ind(_) |
             Constr::Const(_) | Constr::Construct(_) |
             // Constr::Var(_) | Constr::Meta(_) | Constr::Evar(_)
-            Constr::Sort(_) => self.mk_clos(t, ctx),
+            Constr::Sort(_) => self.mk_clos(set, t, ctx),
             Constr::Cast(ref o) => {
                 let (a, b) = {
                     let (ref a, _, ref b) = **o;
-                    let a = clos_fun(self, a, ctx)?;
-                    let b = clos_fun(self, b, ctx)?;
+                    let a = clos_fun(self, set, a, ctx)?;
+                    let b = clos_fun(self, set, b, ctx)?;
                     (a, b)
                 };
                 Ok(FConstr {
@@ -1139,10 +1258,10 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
             Constr::App(ref o) => {
                 let (f, v) = {
                     let (ref f, ref v) = **o;
-                    let f = clos_fun(self, f, ctx)?;
+                    let f = clos_fun(self, set, f, ctx)?;
                     // Expensive, makes a vector
                     let v: Result<_, _> =
-                        v.iter().map( |t| clos_fun(self, t, ctx))
+                        v.iter().map( |t| clos_fun(self, set, t, ctx))
                          .collect();
                     (f, v?)
                 };
@@ -1153,7 +1272,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
             },
             Constr::Proj(ref o) => {
                 let (Proj(ref p, b), ref c) = **o;
-                let c = clos_fun(self, c, ctx)?;
+                let c = clos_fun(self, set, c, ctx)?;
                 Ok(FConstr {
                     norm: Cell::new(RedState::Red),
                     term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Proj(p, b, c)))),
@@ -1162,7 +1281,7 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
             Constr::Case(ref o) => {
                 let c = {
                     let (_, _, ref c, _) = **o;
-                    clos_fun(self, c, ctx)?
+                    clos_fun(self, set, c, ctx)?
                 };
                 let env = self.clone(); // expensive
                 Ok(FConstr {
@@ -1204,11 +1323,11 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
             Constr::Prod(ref o) => {
                 let (t, c) = {
                     let (_, ref t, ref c) = **o;
-                    let t = clos_fun(self, t, ctx)?;
+                    let t = clos_fun(self, set, t, ctx)?;
                     // expensive, but doesn't outlive this block.
                     let mut env = self.clone();
                     env.lift()?;
-                    let c = clos_fun(&env, c, ctx)?;
+                    let c = clos_fun(&env, set, c, ctx)?;
                     (t, c)
                 };
                 Ok(FConstr {
@@ -1219,8 +1338,8 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
             Constr::LetIn(ref o) => {
                 let (b, t) = {
                     let (_, ref b, ref t, _) = **o;
-                    let b = clos_fun(self, b, ctx)?;
-                    let t = clos_fun(self, t, ctx)?;
+                    let b = clos_fun(self, set, b, ctx)?;
+                    let t = clos_fun(self, set, t, ctx)?;
                     (b, t)
                 };
                 let env = self.clone(); // expensive
@@ -1235,35 +1354,35 @@ impl<'a, 'b> Subs<FConstr<'a, 'b>> {
 
     /// A better mk_clos?
     /// Note: t must be typechecked beforehand!
-    fn mk_clos2(&self, t: &'b Constr,
-                ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>> {
-        self.mk_clos_deep((Subs::<FConstr>::mk_clos), t, ctx)
+    fn mk_clos2(&self, set: &Set<'id>, t: &'b Constr,
+                ctx: Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>> {
+        self.mk_clos_deep(set, Subs::mk_clos, t, ctx)
     }
 }
 
-impl<'a, 'b, I, S> ::std::ops::Deref for Stack<'a, 'b, I, S> {
-    type Target = Vec<StackMember<'a, 'b, I, S>>;
-    fn deref(&self) -> &Vec<StackMember<'a, 'b, I, S>> {
+impl<'id, 'a, 'b, I, S> ::std::ops::Deref for Stack<'id, 'a, 'b, I, S> {
+    type Target = Vec<StackMember<'id, 'a, 'b, I, S>>;
+    fn deref(&self) -> &Vec<StackMember<'id, 'a, 'b, I, S>> {
         &self.0
     }
 }
 
-impl<'a, 'b, I, S> ::std::ops::DerefMut for Stack<'a, 'b, I, S> {
-    fn deref_mut(&mut self) -> &mut Vec<StackMember<'a, 'b, I, S>> {
+impl<'id, 'a, 'b, I, S> ::std::ops::DerefMut for Stack<'id, 'a, 'b, I, S> {
+    fn deref_mut(&mut self) -> &mut Vec<StackMember<'id, 'a, 'b, I, S>> {
         &mut self.0
     }
 }
 
-impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
+impl<'id, 'a, 'b, I, S> Stack<'id, 'a, 'b, I, S> {
     pub fn new () -> Self {
         Stack(Vec::new())
     }
 
-    fn push(&mut self, o: StackMember<'a, 'b, I, S>) {
+    fn push(&mut self, o: StackMember<'id, 'a, 'b, I, S>) {
         self.0.push(o);
     }
 
-    pub fn append(&mut self, mut v: Vec<FConstr<'a, 'b>>) {
+    pub fn append(&mut self, mut v: Vec<FConstr<'id, 'a, 'b>>) {
         if v.len() == 0 { return }
         if let Some(&mut StackMember::App(ref mut l)) = self.last_mut() {
             mem::swap(&mut v, l);
@@ -1283,8 +1402,8 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
 
     // since the head may be reducible, we might introduce lifts of 0
     // FIXME: Above comment is not currently true.  Should it be?
-    fn compact(&mut self, head: &FConstr<'a, 'b>,
-               ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
+    fn compact(&mut self, set: &mut Set<'id>, head: &FConstr<'id, 'a, 'b>,
+               ctx: Context<'id, 'a, 'b>) -> IdxResult<()> {
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
@@ -1300,10 +1419,12 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                     // FIXME: Figure out what the above cryptic comment means and whether it
                     // applies to Rust.
                     let h_ = match depth {
-                        Some((depth, _)) => head.lft(depth, ctx),
-                        None => head.lft0(ctx),
+                        Some((depth, _)) => head.lft(set, depth, ctx),
+                        None => head.lft0(set, ctx),
                     }?;
-                    m.update(h_.norm.get(), h_.term.get());
+                    let norm = *set.get(&h_.norm);
+                    let term = *set.get(&h_.term);
+                    m.update(set, norm, term);
                 },
                 s => {
                     // It was fine on the stack before, so it should be fine now.
@@ -1319,12 +1440,12 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     }
 
     /// Put an update mark in the stack, only if needed
-    fn update(&mut self, m: &'a FConstr<'a, 'b>, i: I,
-              ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
-        if m.norm.get() == RedState::Red {
+    fn update(&mut self, set: &mut Set<'id>, m: &'a FConstr<'id, 'a, 'b>, i: I,
+              ctx: Context<'id, 'a, 'b>) -> IdxResult<()> {
+        if *set.get(&m.norm) == RedState::Red {
             // const LOCKED: &'static FTerm<'static> = &FTerm::Locked;
-            self.compact(&m, ctx)?;
-            m.term.set(None);
+            self.compact(set, &m, ctx)?;
+            *set.get_mut(&m.term) = None;
             Ok(self.push(StackMember::Update(m, i)))
         } else { Ok(()) }
     }
@@ -1335,31 +1456,33 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     /// (strip_update_shift, through get_arg).
 
     /// optimized for the case where there are no shifts...
-    fn strip_update_shift_app(&mut self, mut head: FConstr<'a, 'b>,
-                              ctx: &'a Context<'a, 'b>) ->
-                              IdxResult<((Option<Idx>, Stack<'a, 'b, /* !, */I, S>))> {
+    fn strip_update_shift_app(&mut self, set: &mut Set<'id>, mut head: FConstr<'id, 'a, 'b>,
+                              ctx: Context<'id, 'a, 'b>) ->
+                              IdxResult<((Option<Idx>, Stack<'id, 'a, 'b, /* !, */I, S>))> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
-        assert!(head.norm.get() != RedState::Red);
+        assert!(*set.get(&head.norm) != RedState::Red);
         let mut rstk = Stack(Vec::with_capacity(self.len()));
         let mut depth = None;
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::Shift(k, s) => {
                     rstk.push(StackMember::Shift(k, s));
-                    head = head.lft(k, ctx)?;
+                    head = head.lft(set, k, ctx)?;
                     depth = match depth {
                         None => Some(k),
                         Some(depth) => Some(depth.checked_add(k)?),
                     };
                 },
                 StackMember::App(args) => {
-                    rstk.push(StackMember::App(args.clone() /* expensive */));
-                    let h = head.clone();
+                    rstk.push(StackMember::App(clone_vec(&args, set) /* expensive */));
+                    let h = head.clone(set);
                     head.term = Cell::new(Some(ctx.term_arena.alloc(FTerm::App(h, args))));
                 },
                 StackMember::Update(m, _) => {
-                    m.update(head.norm.get(), head.term.get());
+                    let norm = *set.get(&head.norm);
+                    let term = *set.get(&head.term);
+                    m.update(set, norm, term);
                     // NOTE: In the OCaml implementation this might be worthwhile, but I'm not sure
                     // about this one since head is never (AFAICT?) able to be made into a shared
                     // reference before the function returns.
@@ -1380,18 +1503,18 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
         Ok((depth, rstk))
     }
 
-    fn get_nth_arg(&mut self, mut head: FConstr<'a, 'b>, mut n: usize,
-                   ctx: &'a Context<'a, 'b>) ->
-                   IdxResult<Option<(Stack<'a, 'b, /* ! */I, S>, FConstr<'a, 'b>)>> {
+    fn get_nth_arg(&mut self, set: &mut Set<'id>, mut head: FConstr<'id, 'a, 'b>, mut n: usize,
+                   ctx: Context<'id, 'a, 'b>) ->
+                   IdxResult<Option<(Stack<'id, 'a, 'b, /* ! */I, S>, FConstr<'id, 'a, 'b>)>> {
         // FIXME: This could almost certainly be made more efficient using slices (for example) or
         // custom iterators.
-        assert!(head.norm.get() != RedState::Red);
+        assert!(*set.get(&head.norm) != RedState::Red);
         let mut rstk = Stack(Vec::with_capacity(self.len()));
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::Shift(k, s) => {
                     rstk.push(StackMember::Shift(k, s));
-                    head = head.lft(k, ctx)?;
+                    head = head.lft(set, k, ctx)?;
                 },
                 StackMember::App(args) => {
                     let q = args.len();
@@ -1400,20 +1523,20 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                         // assert here, given that we check below to make sure we don't push onto
                         // rstk if n = 0?  Otherwise, should we add similar logic to the below to
                         // avoid pushing an empty arg stack?
-                        rstk.push(StackMember::App(args.clone() /* expensive */));
-                        let h = head.clone();
+                        rstk.push(StackMember::App(clone_vec(&args, set) /* expensive */));
+                        let h = head.clone(set);
                         head.term = Cell::new(Some(ctx.term_arena.alloc(FTerm::App(h, args))));
                         // Safe because n >= q
                         n -= q;
                     } else {
                         // FIXME: Make this all use the proper vector methods (draining etc.).
                         // Safe because n ≤ args.len() (actually < args.len())
-                        let bef = args[..n].to_vec(); // expensive
+                        let bef = clone_vec(&args[..n], set); // expensive
                         // Safe because n < args.len()
-                        let arg = args[n].clone();
+                        let arg = args[n].clone(set);
                         // Safe because (1) n + 1 is in bounds for usize, and
                         // (2) n + 1 ≤ args.len()
-                        let aft = args[n+1..].to_vec(); // expensive
+                        let aft = clone_vec(&args[n+1..], set); // expensive
                         // n = bef.len()
                         if n > 0 {
                             rstk.push(StackMember::App(bef));
@@ -1424,7 +1547,9 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                     }
                 },
                 StackMember::Update(m, _) => {
-                    m.update(head.norm.get(), head.term.get());
+                    let norm = *set.get(&head.norm);
+                    let term = *set.get(&head.term);
+                    m.update(set, norm, term);
                     // NOTE: In the OCaml implementation this might be worthwhile, but I'm not sure
                     // about this one since head is never (AFAICT?) able to be made into a shared
                     // reference before the function returns.
@@ -1452,11 +1577,11 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
     /// Beta reduction: look for an applied argument in the stack.
     /// Since the encountered update marks are removed, h must be a whnf
     /// tys, f, and e must be from a valid FTerm (e.g. tys.len() must be nonzero).
-    fn get_args(&mut self,
+    fn get_args(&mut self, set: &mut Set<'id>,
                 mut tys: &[MRef<'b, (Name, Constr, Constr)>],
                 f: &'b Constr,
-                mut e: Subs<FConstr<'a, 'b>>,
-                ctx: &'a Context<'a, 'b>) -> IdxResult<Application<FConstr<'a, 'b>>> {
+                mut e: Subs<'id, 'a, 'b>,
+                ctx: Context<'id, 'a, 'b>) -> IdxResult<Application<'id, 'a, 'b>> {
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::Update(r, _) => {
@@ -1467,37 +1592,38 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
                     // as it was initially > 0.
                     let tys = tys.to_vec(); // expensive
                     let e = e.clone(); // expensive
-                    r.update(RedState::Cstr,
+                    r.update(set, RedState::Cstr,
                              Some(ctx.term_arena.alloc(FTerm::Lambda(tys, f, e))));
                 },
                 StackMember::Shift(k, _) => {
                     e.shift(k)?;
                 },
-                StackMember::App(l) => {
+                StackMember::App(mut l) => {
                     let n = tys.len();
                     let na = l.len();
                     if n == na {
                         // All arguments have been applied
-                        e.cons(l)?;
+                        e.cons(ctx.fconstr_arena.alloc_extend(l))?;
                         return Ok(Application::Full(e))
                     } else if n < na {
                         // More arguments
                         // FIXME: If we made FLambdas point into slices, these silly allocations
                         // would not be necessary.
                         // Safe because n ≤ l.len()
-                        let args = l[..n].to_vec(); // expensive
+                        // FIXME: This would actually be *cheaper* if the arguments were in reverse
+                        // order, because the drain would be entirely from the back of the vector!
+                        let args = ctx.fconstr_arena.alloc_extend(l.drain(..n));
                         e.cons(args)?;
-                        // Safe because n ≤ na ≤ l.len() (n < na, actually, so eargs will be
-                        // nonempty).
-                        let eargs = l[n..na].to_vec(); // expensive
-                        self.push(StackMember::App(eargs));
+                        // Note that we drained the first n arguments out of the vector, so l now
+                        // contains the remaining ones.
+                        self.push(StackMember::App(l));
                         return Ok(Application::Full(e))
                     } else {
                         // More lambdas
                         // Safe because na ≤ tys.len() (na < tys.len(), actually, so tys will
                         // still be nonempty).
                         tys = &tys[na..];
-                        e.cons(l)?;
+                        e.cons(ctx.fconstr_arena.alloc_extend(l))?;
                     }
                 },
                 s => {
@@ -1516,9 +1642,9 @@ impl<'a, 'b, I, S> Stack<'a, 'b, I, S> {
 
 /* }
 
-impl<'a, 'b, I> Stack<'a, 'b, I, ()> { */
+impl<'id, 'a, 'b, I> Stack<'id, 'a, 'b, I, ()> { */
     /// Eta expansion: add a reference to implicit surrounding lambda at end of stack
-    pub fn eta_expand_stack(&mut self, ctx: &'a Context<'a, 'b>, s: S) {
+    pub fn eta_expand_stack(&mut self, ctx: Context<'id, 'a, 'b>, s: S) {
         // FIXME: Given that we want to do this, seriously consider using a VecDeque rather than a
         // stack.  That would make this operation O(1).  The only potential downside would be less
         // easy slicing, but that might not matter too much if we do things correctly (as_slices is
@@ -1535,23 +1661,23 @@ impl<'a, 'b, I> Stack<'a, 'b, I, ()> { */
     }
 /* }
 
-impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
+impl<'id, 'a, 'b, S> Stack<'id, 'a, 'b, !, S> { */
     /// Iota reduction: extract the arguments to be passed to the Case
     /// branches
     /// Stacks on which this is called must satisfy:
     /// - stack is composed exclusively of Apps and Shifts.
     /// - depth = sum of shifts in this stack.
-    fn reloc_rargs(&mut self, depth: Option<Idx>,
-                   ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
+    fn reloc_rargs(&mut self, set: &Set<'id>, depth: Option<Idx>,
+                   ctx: Context<'id, 'a, 'b>) -> IdxResult<()> {
         let mut depth = if let Some(depth) = depth { depth } else { return Ok(()) };
-        let done = Cell::new(None);
+        let done = RustCell::new(None);
         // We wastefully drop the shifts.
         let iter = self.drain_filter( |shead| {
             if done.get().is_some() { return false }
             match *shead {
                 StackMember::App(ref mut args) => {
                     for arg in args.iter_mut() {
-                        match arg.lft(depth, ctx) {
+                        match arg.lft(set, depth, ctx) {
                             Ok(h) => { *arg = h },
                             Err(e) => {
                                 done.set(Some(Err(e)));
@@ -1596,8 +1722,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// Only call with a stack and depth produced by strip_update_shift_app.
     /// (strip_update_shift_app produces a stack with only Zapp and Zshift items, and depth = sum
     /// of shifts in the stack).
-    fn try_drop_parameters(&mut self, mut depth: Option<Idx>, mut n: usize,
-                           ctx: &'a Context<'a, 'b>) -> IdxResult<Option<()>> {
+    fn try_drop_parameters(&mut self, set: &Set<'id>, mut depth: Option<Idx>, mut n: usize,
+                           ctx: Context<'id, 'a, 'b>) -> IdxResult<Option<()>> {
         // Drop should only succeed here if n == 0 (i.e. there were no additional parameters to
         // drop).  But we should never reach the end of the while loop unless there was no
         // StackMember::App in the stack, because if n = 0, ∀ q : usize, n ≤ q, which would
@@ -1618,10 +1744,10 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             // be nonempty).
                             // FIXME: If we made FLambdas point into slices, this silly allocation
                             // would not be necessary (note to self: is this actually true?).
-                            let aft = args[n..].to_vec(); // expensive
+                            let aft = clone_vec(&args[n..], set); // expensive
                             self.append(aft);
                         }
-                        self.reloc_rargs(depth, ctx)?;
+                        self.reloc_rargs(set, depth, ctx)?;
                         return Ok(Some(()));
                     }
                 },
@@ -1646,9 +1772,9 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// of shifts in the stack).
     /// FIXME: Figure out a way to usefully incorporate "this term has been typechecked" into
     /// Rust's type system (maybe some sort of weird wrapper around Constr?).
-    fn drop_parameters(&mut self, depth: Option<Idx>, n: usize,
-                       ctx: &'a Context<'a, 'b>) -> IdxResult<()> {
-        self.try_drop_parameters(depth, n, ctx)
+    fn drop_parameters(&mut self, set: &Set<'id>, depth: Option<Idx>, n: usize,
+                       ctx: Context<'id, 'a, 'b>) -> IdxResult<()> {
+        self.try_drop_parameters(set, depth, n, ctx)
             .map( |res| res.expect("We know n < stack_arg_size(self) if well-typed term") )
     }
 
@@ -1699,15 +1825,17 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// be caught by the same catch.  Additionally, typechecking *does* appear to check that
     /// Construct referencing an inductive that's not in the environment shouldn't happen,
     /// regardless of conversion errors.
-    pub fn eta_expand_ind_stack<'c, 'g>(globals: &Globals<'g>,
-                                       ind: &'b Ind,
-                                       m: FConstr<'a, 'b>,
-                                       s: &mut Stack<'a, 'b, I, S>,
-                                       f: FConstr<'c, 'b>,
-                                       s_: &mut Stack<'c, 'b, I, S>,
-                                       ctx: &'a Context<'a, 'b>,
-                                       ctx_: &'c Context<'c, 'b>) ->
-        RedResult<Option<(Stack<'a, 'b, I, S>, Stack<'c, 'b, I, S>)>>
+    pub fn eta_expand_ind_stack<'id_, 'c, 'g>(globals: &Globals<'g>,
+                                              set: &mut Set<'id>,
+                                              set_: &mut Set<'id_>,
+                                              ind: &'b Ind,
+                                              m: FConstr<'id, 'a, 'b>,
+                                              s: &mut Stack<'id, 'a, 'b, I, S>,
+                                              f: FConstr<'id_, 'c, 'b>,
+                                              s_: &mut Stack<'id_, 'c, 'b, I, S>,
+                                              ctx: Context<'id, 'a, 'b>,
+                                              ctx_: Context<'id_, 'c, 'b>) ->
+        RedResult<Option<(Stack<'id, 'a, 'b, I, S>, Stack<'id_, 'c, 'b, I, S>)>>
         where 'g: 'b,
     {
         // FIXME: Typechecking appears to verify that this should always be found, so consider
@@ -1719,17 +1847,17 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 // arg1..argn ~= (proj1 t...projn t) where t = zip (f,s')
                 // TODO: Verify that this is checked at some point during typechecking.
                 let pars = usize::try_from(mib.nparams).map_err(IdxError::from)?;
-                let right = f.fapp_stack_mut(s_, ctx_)?;
-                let (depth, mut args) = s.strip_update_shift_app(m, ctx)?;
+                let right = f.fapp_stack_mut(set_, s_, ctx_)?;
+                let (depth, mut args) = s.strip_update_shift_app(set, m, ctx)?;
                 // Try to drop the params, might fail on partially applied constructors.
-                if let None = args.try_drop_parameters(depth, pars, ctx)? {
+                if let None = args.try_drop_parameters(set, depth, pars, ctx)? {
                     return Ok(None);
                 }
                 // expensive: makes a Vec.
                 let hstack: Vec<_> = projs.iter().map( |p| FConstr {
                     norm: Cell::new(RedState::Red), // right can't be a constructor though
                     term: Cell::new(Some(ctx_.term_arena.alloc(FTerm::Proj(p, false,
-                                                                           right.clone())))),
+                                                                           right.clone(set_))))),
                 }).collect();
                 // FIXME: Ensure that projs is non-empty, since otherwise we'll have an empty
                 // ZApp.
@@ -1745,7 +1873,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// of a projection.
     /// (drop_parameters produces a stack with only Zapp items, and thanks to type-
     /// checking n should be an index somewhere in the stack).
-    fn project_nth_arg(&mut self, mut n: usize) -> FConstr<'a, 'b> {
+    fn project_nth_arg(&mut self, mut n: usize) -> FConstr<'id, 'a, 'b> {
         while let Some(shead) = self.pop() {
             match shead {
                 StackMember::App(mut args) => {
@@ -1769,14 +1897,14 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// inductive).
     ///
     /// Note: m must be typechecked beforehand!
-    fn knh<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b>, globals: &mut Globals<'g>,
-                   m: FConstr<'a, 'b>,
-                   ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    fn knh<'r, 'g>(&mut self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &Globals<'g>,
+                   m: FConstr<'id, 'a, 'b>,
+                   ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
     {
-        let mut m: Cow<'a, FConstr<'a, 'b>> = Cow::Owned(m);
+        let mut m: SCow<'a, FConstr<'id, 'a, 'b>> = Cow::Owned(m);
         loop {
-            match *m.fterm().expect("Tried to lift a locked term") {
+            match *m.fterm(&info.set).expect("Tried to lift a locked term") {
                 FTerm::Lift(k, ref a) => {
                     self.shift(k, s.clone())?;
                     m = Cow::Borrowed(a);
@@ -1785,7 +1913,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
-                        self.update(m, i.clone(), ctx)?;
+                        self.update(&mut info.set, m, i.clone(), ctx)?;
                     }
                     // NOTE: Mutual recursion is fine in OCaml since it's all tail recursive, but
                     // not in Rust.
@@ -1794,7 +1922,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         match *t {
                             Constr::App(ref o) => {
                                 let (ref a, ref b) = **o;
-                                self.append(e.mk_clos_vect(b, ctx)?);
+                                self.append(e.mk_clos_vect(&info.set, b, ctx)?);
                                 t = a;
                             },
                             Constr::Case(ref o) => {
@@ -1806,7 +1934,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             Constr::Fix(_) => { // laziness
                                 // FIXME: Are we creating a term here and then immediately
                                 // destroying it?
-                                m = Cow::Owned(e.mk_clos2(t, ctx)?);
+                                m = Cow::Owned(e.mk_clos2(&info.set, t, ctx)?);
                                 break; // knh
                             },
                             Constr::Cast(ref o) => {
@@ -1816,19 +1944,20 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             Constr::Rel(n) => {
                                 // TODO: Might know n is NonZero if it's been typechecked?
                                 let n = Idx::new(NonZero::new(n).ok_or(IdxError::from(NoneError))?)?;
-                                m = Cow::Owned(e.clos_rel(n, ctx)?);
+                                m = Cow::Owned(e.clos_rel(&info.set, n, ctx)?);
                                 break; // knh
                             },
                             Constr::Proj(_) => { // laziness
                                 // FIXME: Are we creating a term here and then immediately
                                 // destroying it?
-                                m = Cow::Owned(e.mk_clos2(t, ctx)?);
+                                m = Cow::Owned(e.mk_clos2(&info.set, t, ctx)?);
                                 break; // knh
                             },
                             Constr::Lambda(_) | Constr::Prod(_) | Constr::Construct(_) |
                             Constr::CoFix(_) | Constr::Ind(_) | Constr::LetIn(_) |
                             Constr::Const(_) | /*Constr::Var(_) | Constr::Evar(_) |
-                            Constr::Meta(_) | */Constr::Sort(_) => return Ok(e.mk_clos2(t, ctx)?),
+                            Constr::Meta(_) | */Constr::Sort(_) =>
+                                return Ok(e.mk_clos2(&info.set, t, ctx)?),
                         }
                     }
                 },
@@ -1836,18 +1965,19 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
-                        self.update(m, i.clone(), ctx)?;
+                        self.update(&mut info.set, m, i.clone(), ctx)?;
                     }
-                    self.append(b.clone() /* expensive */);
+                    self.append(clone_vec(b, &info.set) /* expensive */);
                     m = Cow::Borrowed(a);
                 },
                 FTerm::Case(o, ref p, ref t, ref br) => {
                     if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
-                        self.update(m, i.clone(), ctx)?;
+                        self.update(&mut info.set, m, i.clone(), ctx)?;
                     }
-                    self.push(StackMember::Case(o, p.clone(), br.clone() /* expensive */,
+                    self.push(StackMember::Case(o, p.clone(&info.set),
+                                                clone_vec(br, &info.set) /* expensive */,
                                                 i.clone()));
                     m = Cow::Borrowed(t);
                 },
@@ -1855,9 +1985,10 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     if let Cow::Borrowed(m) = m {
                         // NOTE: We probably only want to bother updating this reference if it's
                         // shared, right?
-                        self.update(m, i.clone(), ctx)?;
+                        self.update(&mut info.set, m, i.clone(), ctx)?;
                     }
-                    self.push(StackMember::CaseT(o, env.clone() /* expensive */, i.clone()));
+                    self.push(StackMember::CaseT(o, env.clone() /* expensive */,
+                                                 i.clone()));
                     m = Cow::Borrowed(t);
                 },
                 FTerm::Fix(o, n, _) => {
@@ -1869,8 +2000,9 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     // TODO: Verify that ri[n] is within usize is checked at some point during
                     // typechecking.
                     let n = usize::try_from(ri[n]).map_err(IdxError::from)?;
-                    let m_ = m.into_owned();
-                    match self.get_nth_arg(m_.clone(), n, ctx)? {
+                    let m_ = m.clone(&info.set);
+                    let m__ = m_.clone(&info.set);
+                    match self.get_nth_arg(&mut info.set, m__, n, ctx)? {
                         Some((pars, arg)) => {
                             self.push(StackMember::Fix(m_, pars, i.clone()));
                             m = Cow::Owned(arg);
@@ -1894,7 +2026,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         if let Cow::Borrowed(m) = m {
                             // NOTE: We probably only want to bother updating this reference if
                             // it's shared, right?
-                            self.update(m, i.clone(), ctx)?;
+                            self.update(&mut info.set, m, i.clone(), ctx)?;
                         }
                         // TODO: Verify that npars and arg being within usize is checked at some
                         // point during typechecking.
@@ -1903,7 +2035,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                         self.push(StackMember::Proj(npars, arg, p, b, i.clone()));
                         m = Cow::Borrowed(c);
                     } else {
-                        return Ok(m.into_owned())
+                        return Ok(m.clone(&info.set))
                     }
                 },
 
@@ -1911,7 +2043,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 FTerm::Flex(_) | FTerm::LetIn(_, _, _, _) | FTerm::Construct(_) |
                 /*FTerm::Evar(_) |*/
                 FTerm::CoFix(_, _, _) | FTerm::Lambda(_, _, _) | FTerm::Rel(_) | FTerm::Atom(_) |
-                FTerm::Ind(_) | FTerm::Prod(_, _, _) => return Ok(m.into_owned()),
+                FTerm::Ind(_) | FTerm::Prod(_, _, _) => return Ok(m.clone(&info.set)),
             }
         }
     }
@@ -1919,16 +2051,16 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// The same for pure terms
     ///
     /// Note: m must be typechecked beforehand!
-    fn knht<'r, 'g>(&mut self, info: &mut ClosInfos<'a, 'b>, globals: &mut Globals<'g>,
-                    env: &Subs<FConstr<'a, 'b>>, mut t: &'b Constr,
-                    ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    fn knht<'r, 'g>(&mut self, info: &mut ClosInfos<'id, 'a, 'b>, globals: &Globals<'g>,
+                    env: &Subs<'id, 'a, 'b>, mut t: &'b Constr,
+                    ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
     {
         loop {
             match *t {
                 Constr::App(ref o) => {
                     let (ref a, ref b) = **o;
-                    self.append(env.mk_clos_vect(b, ctx)?);
+                    self.append(env.mk_clos_vect(&info.set, b, ctx)?);
                     t = a;
                 },
                 Constr::Case(ref o) => {
@@ -1940,7 +2072,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 Constr::Fix(_) => { // laziness
                     // FIXME: Are we creating a term here and then immediately
                     // destroying it?
-                    return self.knh(info, globals, env.mk_clos2(t, ctx)?, ctx, i, s)
+                    let t = env.mk_clos2(&info.set, t, ctx)?;
+                    return self.knh(info, globals, t, ctx, i, s)
                 },
                 Constr::Cast(ref o) => {
                     let (_, _, ref a) = **o;
@@ -1949,17 +2082,19 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 Constr::Rel(n) => {
                     // TODO: Might know n is NonZero if it's been typechecked?
                     let n = Idx::new(NonZero::new(n).ok_or(IdxError::from(NoneError))?)?;
-                    return self.knh(info, globals, env.clos_rel(n, ctx)?, ctx, i, s)
+                    let t = env.clos_rel(&info.set, n, ctx)?;
+                    return self.knh(info, globals, t, ctx, i, s)
                 },
                 Constr::Proj(_) => { // laziness
                     // FIXME: Are we creating a term here and then immediately
                     // destroying it?
-                    return self.knh(info, globals, env.mk_clos2(t, ctx)?, ctx, i, s)
+                    let t = env.mk_clos2(&info.set, t, ctx)?;
+                    return self.knh(info, globals, t, ctx, i, s)
                 },
                 Constr::Lambda(_) | Constr::Prod(_) | Constr::Construct(_) |
                 Constr::CoFix(_) | Constr::Ind(_) | Constr::LetIn(_) |
                 Constr::Const(_) | /*Constr::Var(_) | Constr::Evar(_) |
-                Constr::Meta(_) | */Constr::Sort(_) => return Ok(env.mk_clos2(t, ctx)?),
+                Constr::Meta(_) | */Constr::Sort(_) => return Ok(env.mk_clos2(&info.set, t, ctx)?),
             }
         }
     }
@@ -1967,16 +2102,18 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// Computes a weak head normal form from the result of knh.
     ///
     /// Note: m must be typechecked beforehand!
-    pub fn knr<'r, 'g>(&mut self, info: &'r mut ClosInfos<'a, 'b>, globals: &'r mut Globals<'g>,
-                       mut m: FConstr<'a, 'b>,
-                       ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    pub fn knr<'r, 'g>(&mut self, info: &'r mut ClosInfos<'id, 'a, 'b>,
+                       globals: &'r Globals<'g>,
+                       mut m: FConstr<'id, 'a, 'b>,
+                       ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
     {
         loop {
-            let t = if let Some(t) = m.fterm() { t } else { return Ok(m) };
+            let t = if let Some(t) = m.fterm(&info.set) { t } else { return Ok(m) };
             match *t {
                 FTerm::Lambda(ref tys, f, ref e) if info.flags.contains(Reds::BETA) => {
-                    match self.get_args(tys, f, e.clone() /* expensive */, ctx)? {
+                    let e = e.clone(); /* expensive */
+                    match self.get_args(&mut info.set, tys, f, e, ctx)? {
                         Application::Full(e) => {
                             // Mutual tail recursion is fine in OCaml, but not Rust.
                             m = self.knht(info, globals, &e, f, ctx, i.clone(), s.clone())?;
@@ -1985,7 +2122,8 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     }
                 },
                 FTerm::Flex(rf) if info.flags.contains(Reds::DELTA) => {
-                    let v = match info.ref_value_cache(globals, rf, ctx)? {
+                    let v = match Infos::ref_value_cache(&info.set, &mut info.rels, &mut info.tab,
+                                                         globals, rf, ctx)? {
                         Some(v) => {
                             // TODO: Consider somehow keeping a reference alive here (maybe by
                             // allocating the term in an arena).  This is the only place (I
@@ -2004,10 +2142,10 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             // ref_value_cache.  If that is indeed the case, we might be able to
                             // refactor to let update lifetimes live only for the length of the
                             // knh function call, or something).
-                            v.clone()
+                            v.clone(&info.set)
                         },
                         None => {
-                            m.set_norm();
+                            m.set_norm(&mut info.set);
                             return Ok(m)
                         }
                     };
@@ -2016,7 +2154,9 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 },
                 FTerm::Construct(o) if info.flags.contains(Reds::IOTA) => {
                     let c = ((*o).0).0.idx;
-                    let (depth, mut args) = self.strip_update_shift_app(m.clone(), ctx)?;
+                    let m_ = m.clone(&info.set);
+                    let (depth, mut args) = self.strip_update_shift_app(&mut info.set,
+                                                                        m_, ctx)?;
                     let shead = if let Some(shead) = self.pop() { shead } else {
                         *self = args;
                         return Ok(m)
@@ -2026,7 +2166,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             let (ref ci, _, _, _) = **o;
                             // TODO: Verify that this is checked at some point during typechecking.
                             let npar = usize::try_from(ci.npar).map_err(IdxError::from)?;
-                            args.drop_parameters(depth, npar, ctx)?;
+                            args.drop_parameters(&info.set, depth, npar, ctx)?;
                             // TODO: Verify that this is checked at some point during typechecking.
                             let c = usize::try_from(c).map_err(IdxError::from)?;
                             self.extend(args.0.into_iter());
@@ -2037,7 +2177,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             let (ref ci, _, _, ref br) = **o;
                             // TODO: Verify that this is checked at some point during typechecking.
                             let npar = usize::try_from(ci.npar).map_err(IdxError::from)?;
-                            args.drop_parameters(depth, npar, ctx)?;
+                            args.drop_parameters(&info.set, depth, npar, ctx)?;
                             // TODO: Verify that this is checked at some point during typechecking.
                             let c = usize::try_from(c).map_err(IdxError::from)?;
                             self.extend(args.0.into_iter());
@@ -2046,18 +2186,18 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                             m = self.knht(info, globals, &env, &br[c - 1], ctx, i, s.clone())?;
                         },
                         StackMember::Fix(fx, par, i) => {
-                            let rarg = m.fapp_stack_mut(&mut args, ctx)?;
+                            let rarg = m.fapp_stack_mut(&mut info.set, &mut args, ctx)?;
                             // makes a Vec, but not that expensive.
                             self.append(vec![rarg]);
                             self.extend(par.0.into_iter());
-                            let (fxe, fxbd) = fx.fterm()
+                            let (fxe, fxbd) = fx.fterm(&info.set)
                                 .expect("Tried to lift a locked term")
                                 .contract_fix_vect(ctx)?;
                             // Mutual tail recursion is fine in OCaml, but not Rust.
                             m = self.knht(info, globals, &fxe, fxbd, ctx, i, s.clone())?;
                         },
                         StackMember::Proj(n, m_, _, _, i) => {
-                            args.drop_parameters(depth, n, ctx)?;
+                            args.drop_parameters(&info.set, depth, n, ctx)?;
                             let rarg = args.project_nth_arg(m_);
                             // Mutual tail recursion is fine in OCaml, but not Rust.
                             m = self.knh(info, globals, rarg, ctx, i, s.clone())?;
@@ -2071,11 +2211,12 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                     }
                 },
                 FTerm::CoFix(_, _, _) if info.flags.contains(Reds::IOTA) => {
-                    let (_, mut args) = self.strip_update_shift_app(m.clone(), ctx)?;
+                    let m_ = m.clone(&info.set);
+                    let (_, mut args) = self.strip_update_shift_app(&mut info.set, m_, ctx)?;
                     match self.last() {
                         Some(&StackMember::Case(_, _, _, _)) |
                         Some(&StackMember::CaseT(_, _, _)) => {
-                            let (fxe,fxbd) = m.fterm()
+                            let (fxe,fxbd) = m.fterm(&info.set)
                                 .expect("Tried to lift a locked term")
                                 .contract_fix_vect(ctx)?;
                             self.extend(args.0.into_iter());
@@ -2095,8 +2236,7 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
                 FTerm::LetIn(o, ref v, _, ref e) if info.flags.contains(Reds::ZETA) => {
                     let (_, _, _, ref bd) = **o;
                     let mut e = e.clone(); // expensive
-                    // makes a Vec, but not that expensive.
-                    e.cons(vec![v.clone()])?;
+                    e.cons(ctx.fconstr_arena.alloc_extend(iter::once(v.clone(&info.set))))?;
                     // Mutual tail recursion is fine in OCaml, but not Rust.
                     m = self.knht(info, globals, &e, bd, ctx, i.clone(), s.clone())?;
                 },
@@ -2108,32 +2248,33 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
     /// Computes the weak head normal form of a term
     ///
     /// Note: m must be typechecked beforehand!
-    pub fn kni<'r, 'g>(&'r mut self, info: &mut ClosInfos<'a, 'b>, globals: &'r mut Globals<'g>,
-                       m: FConstr<'a, 'b>,
-                       ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    pub fn kni<'r, 'g>(&'r mut self, info: &mut ClosInfos<'id, 'a, 'b>,
+                       globals: &'r Globals<'g>,
+                       m: FConstr<'id, 'a, 'b>,
+                       ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
     {
         let hm = self.knh(info, globals, m, ctx, i.clone(), s.clone())?;
         self.knr(info, globals, hm, ctx, i, s)
     }
 
-    fn kh<'r, 'g>(&mut self, info: &'r mut ClosInfos<'a, 'b>, globals: &'r mut Globals<'g>,
-                  v: FConstr<'a, 'b>,
-                  ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    fn kh<'r, 'g>(&mut self, info: &'r mut ClosInfos<'id, 'a, 'b>, globals: &'r Globals<'g>,
+                  v: FConstr<'id, 'a, 'b>,
+                  ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
     {
         Ok(self.kni(info, globals, v, ctx, i, s)?
-               .fapp_stack_mut(self, ctx)?)
+               .fapp_stack_mut(&mut info.set, self, ctx)?)
     }
 
 
     /// [whd_stack] performs weak head normalization in a given stack. It
     /// stops whenever a reduction is blocked.
     /// Note: v must be typechecked beforehand!
-    pub fn whd_stack<'r, 'g>(&mut self, info: &'r mut ClosInfos<'a, 'b>,
-                             globals: &'r mut Globals<'g>,
-                             v: FConstr<'a, 'b>,
-                             ctx: &'a Context<'a, 'b>, i: I, s: S) -> RedResult<FConstr<'a, 'b>>
+    pub fn whd_stack<'r, 'g>(&mut self, info: &'r mut ClosInfos<'id, 'a, 'b>,
+                             globals: &'r Globals<'g>,
+                             v: FConstr<'id, 'a, 'b>,
+                             ctx: Context<'id, 'a, 'b>, i: I, s: S) -> RedResult<FConstr<'id, 'a, 'b>>
         where 'g: 'b, S: Clone, I: Clone,
     {
         let k = self.kni(info, globals, v, ctx, i, s)?;
@@ -2144,21 +2285,22 @@ impl<'a, 'b, S> Stack<'a, 'b, !, S> { */
         // we don't have any updates?
         // TODO: Maybe there's a clever way FTerms can "point into the stack" which would allow us
         // to avoid this step entirely...
-        k.fapp_stack(self, ctx)?; // to unlock Zupdates!
+        k.fapp_stack(&mut info.set, self, ctx)?; // to unlock Zupdates!
         Ok(k)
     }
 }
 
-impl<'a, 'b> FTerm<'a, 'b> {
+impl<'id, 'a, 'b> FTerm<'id, 'a, 'b> {
     /// Do not call this function unless tys.len() ≥ 1.
-    pub fn dest_flambda<F>(clos_fun: F,
+    pub fn dest_flambda<F>(set: &Set<'id>,
+                           clos_fun: F,
                            tys: &[MRef<'b, (Name, Constr, Constr)>],
                            b: &'b Constr,
-                           e: &Subs<FConstr<'a, 'b>>,
-                           ctx: &'a Context<'a, 'b>) ->
-        IdxResult<(Name, FConstr<'a, 'b>, FConstr<'a, 'b>)>
-        where F: Fn(&Subs<FConstr<'a, 'b>>,
-                    &'b Constr, &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>,
+                           e: &Subs<'id, 'a, 'b>,
+                           ctx: Context<'id, 'a, 'b>) ->
+        IdxResult<(Name, FConstr<'id, 'a, 'b>, FConstr<'id, 'a, 'b>)>
+        where F: Fn(&Subs<'id, 'a, 'b>, &Set<'id>,
+                    &'b Constr, Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>>,
     {
         // FIXME: consider using references to slices for FTerm::Lambda arguments instead of Vecs.
         // That would allow us to avoid cloning tys here.  However, this might not matter if it
@@ -2170,11 +2312,11 @@ impl<'a, 'b> FTerm<'a, 'b> {
         let mut tys = tys.to_vec(); // expensive
         let o = tys.pop().expect("Should not call dest_flambda with tys.len() = 0");
         let (ref na, ref ty, _) = **o;
-        let ty = clos_fun(e, ty, ctx)?;
+        let ty = clos_fun(e, set, ty, ctx)?;
         let mut e = e.clone(); /* expensive */
         e.lift()?;
         Ok((na.clone(), ty, if tys.len() == 0 {
-            clos_fun(&e, &b, ctx)?
+            clos_fun(&e, set, &b, ctx)?
         } else {
             FConstr {
                 norm: Cell::new(RedState::Cstr),
@@ -2196,8 +2338,8 @@ impl<'a, 'b> FTerm<'a, 'b> {
     ///
     /// Must be passed a FTerm::Fix or FTerm::CoFix.
     /// Also, the term it is passed must be typechecked.
-    fn contract_fix_vect(&self, ctx: &'a Context<'a, 'b>) ->
-        IdxResult<(Subs<FConstr<'a, 'b>>, &'b Constr)>
+    fn contract_fix_vect(&self,  ctx: Context<'id, 'a, 'b>) ->
+        IdxResult<(Subs<'id, 'a, 'b>, &'b Constr)>
     {
         // TODO: This function is *hugely* wasteful.  It allocates a gigantic number of potential
         // fixpoint substitutions every time it's called, even though most of them almost certainly
@@ -2222,14 +2364,13 @@ impl<'a, 'b> FTerm<'a, 'b> {
                 // a big vector here?  How important is the cheap at-index access during
                 // substitution, considering that we have to iterate through the list at least once
                 // anyway to create the vector in the first place?
-                // expensive: makes a Vec.
-                env.cons((0..bds.len()).map( |j| {
+                env.cons(ctx.fconstr_arena.alloc_extend((0..bds.len()).map( |j| {
                     let env = env_.clone(); // expensive
                     FConstr {
                         norm: Cell::new(RedState::Cstr),
                         term: Cell::new(Some(ctx.term_arena.alloc(FTerm::Fix(o, j, env)))),
                     }
-                }).collect())?;
+                })))?;
                 // FIXME: Verify that bds[i] in bounds is checked at some point during
                 // typechecking.  If not, we must check for it here.
                 Ok((env, &bds[i]))
@@ -2241,14 +2382,13 @@ impl<'a, 'b> FTerm<'a, 'b> {
                 // a big vector here?  How important is the cheap at-index access during
                 // substitution, considering that we have to iterate through the list at least once
                 // anyway to create the vector in the first place?
-                // expensive: makes a Vec.
-                env.cons((0..bds.len()).map(|j| {
+                env.cons(ctx.fconstr_arena.alloc_extend((0..bds.len()).map(|j| {
                     let env = env_.clone(); // expensive
                     FConstr {
                         norm: Cell::new(RedState::Cstr),
                         term: Cell::new(Some(ctx.term_arena.alloc(FTerm::CoFix(o, j, env)))),
                     }
-                }).collect())?;
+                })))?;
                 // FIXME: Verify that bds[i] in bounds is checked at some point during
                 // typechecking.  If not, we must check for it here.
                 Ok((env, &bds[i]))
@@ -2260,14 +2400,14 @@ impl<'a, 'b> FTerm<'a, 'b> {
 
 impl Constr {
     /// Note: v must be typechecked beforehand!
-    fn of_fconstr_lift<'a, 'b>(v: &FConstr<'a, 'b>, lfts: &Lift,
-                           ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
+    fn of_fconstr_lift<'id, 'a, 'b>(v: &FConstr<'id, 'a, 'b>, set: &mut Set<'id>, lfts: &Lift,
+                           ctx: Context<'id, 'a, 'b>) -> IdxResult<Constr> {
         // In general, it might be nice to make this function tail recursive (by using an explicit
         // stack) rather than having confusing mutual recursion between of_fconstr_lift and
         // to_constr.
-        if !lfts.is_id() { return v.to_constr(Constr::of_fconstr_lift, lfts, ctx) }
-        let term = if let Some(v) = v.fterm() { v } else {
-            return v.to_constr(Constr::of_fconstr_lift, lfts, ctx);
+        if !lfts.is_id() { return v.to_constr(set, Constr::of_fconstr_lift, lfts, ctx) }
+        let term = if let Some(v) = v.fterm(set) { v } else {
+            return v.to_constr(set, Constr::of_fconstr_lift, lfts, ctx);
         };
         match *term {
             FTerm::Clos(t, ref env) if env.is_id() => Ok(t.clone()),
@@ -2300,13 +2440,13 @@ impl Constr {
                 // FIXME: Is there any way to determine that the interior term hasn't been touched?
                 // If so, can we reuse the old case allocation?
                 let (ref ci, ref p, _, ref b) = **o;
-                let c = Constr::of_fconstr_lift(c, lfts, ctx)?;
-                Ok(Constr::Case(ORef(Rc::from((ci.clone(), p.clone(), c, b.clone())))))
+                let c = Constr::of_fconstr_lift(c, set, lfts, ctx)?;
+                Ok(Constr::Case(ORef(Arc::from((ci.clone(), p.clone(), c, b.clone())))))
             },
             FTerm::Fix(o, i, ref e) if e.is_id() => {
                 let Fix(Fix2(ref reci, _), ref p) = **o;
                 // TODO: If we can figure out how to cache this we may be able to avoid
-                // allocating a fresh Rc.
+                // allocating a fresh Arc.
                 // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
                 // i64 if it was created directly from a Constr.  We also know that i fits in
                 // an isize if it was created by unfolding a Fix, since all the FTerm::Fix
@@ -2314,12 +2454,12 @@ impl Constr {
                 // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
                 // be determined is whether isize is always guaranteed to fit in an i64.  If
                 // that's true, this cast necessarily succeeds.
-                Ok(Constr::Fix(ORef(Rc::from(Fix(Fix2(reci.clone(), i as i64), p.clone())))))
+                Ok(Constr::Fix(ORef(Arc::from(Fix(Fix2(reci.clone(), i as i64), p.clone())))))
             },
             FTerm::CoFix(o, i, ref e) if e.is_id() => {
                 let CoFix(_, ref p) = **o;
                 // TODO: If we can figure out how to cache this we may be able to avoid
-                // allocating a fresh Rc.
+                // allocating a fresh Arc.
                 // FIXME: We know (assuming reasonable FTerm construction) that i fits in an
                 // i64 if it was created directly from a Constr.  We also know that i fits in
                 // an isize if it was created by unfolding a CoFix, since all the FTerm::CoFix
@@ -2327,9 +2467,9 @@ impl Constr {
                 // that vector lengths (in bytes, actually!) fit in an isize.  What remains to
                 // be determined is whether isize is always guaranteed to fit in an i64.  If
                 // that's true, this cast necessarily succeeds.
-                Ok(Constr::CoFix(ORef(Rc::from(CoFix(i as i64, p.clone())))))
+                Ok(Constr::CoFix(ORef(Arc::from(CoFix(i as i64, p.clone())))))
             },
-            _ => v.to_constr(Constr::of_fconstr_lift, lfts, ctx)
+            _ => v.to_constr(set, Constr::of_fconstr_lift, lfts, ctx)
         }
     }
 
@@ -2338,20 +2478,23 @@ impl Constr {
     /// then we directly return the constr to avoid possibly huge
     /// reallocation.
     /// Note: v must be typechecked beforehand!
-    pub fn of_fconstr<'a, 'b>(v: &FConstr<'a, 'b>,
-                              ctx: &'a Context<'a, 'b>) -> IdxResult<Constr> {
+    pub fn of_fconstr<'id, 'a, 'b>(v: &FConstr<'id, 'a, 'b>,
+                                   set: &mut Set<'id>,
+                                   ctx: Context<'id, 'a, 'b>) -> IdxResult<Constr> {
         let lfts = Lift::id();
-        Constr::of_fconstr_lift(v, &lfts, ctx)
+        Constr::of_fconstr_lift(v, set, &lfts, ctx)
     }
 
-    pub fn inject<'a, 'b>(&'b self, ctx: &'a Context<'a, 'b>) -> IdxResult<FConstr<'a, 'b>>
+    pub fn inject<'id, 'a, 'b>(&'b self,
+                               set: &Set<'id>,
+                               ctx: Context<'id, 'a, 'b>) -> IdxResult<FConstr<'id, 'a, 'b>>
     {
         let env = Subs::id(None);
-        env.mk_clos(self, ctx)
+        env.mk_clos(set, self, ctx)
     }
 }
 
-impl<'a, 'b, T> Infos<'b, T> {
+impl<'id, 'a, 'b, T> Infos<'id, 'b, T> {
     fn defined_rels<I>(rel_context: I) -> IdxResult<(u32, VecMap<&'b mut Constr>)>
         where I: Iterator<Item=&'b mut RDecl>
     {
@@ -2374,10 +2517,11 @@ impl<'a, 'b, T> Infos<'b, T> {
         Ok((i, rels?))
     }
 
-    pub fn create<I>(flgs: Reds, rel_context: I) -> IdxResult<Self>
+    pub fn create<I>(set: Set<'id>, flgs: Reds, rel_context: I) -> IdxResult<Self>
         where I: Iterator<Item=&'b mut RDecl>
     {
         Ok(Infos {
+            set: set,
             flags: flgs,
             rels: Self::defined_rels(rel_context)?,
             tab: KeyTable(HashMap::with_capacity(17)),

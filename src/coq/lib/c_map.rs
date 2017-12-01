@@ -58,8 +58,8 @@ impl<K, V> CMap<K, V> {
 }
 
 impl<'de, K, V> serde::de::DeserializeState<'de, Seed<'de>> for Map<K, V>
-    where K: Hash + Eq + Clone + 'static,
-          V: Clone + 'static,
+    where K: Hash + Eq + Clone + Send + Sync + 'static,
+          V: Send + Sync + Clone + 'static,
           K: serde::de::DeserializeState<'de, Seed<'de>>,
           V: serde::de::DeserializeState<'de, Seed<'de>>,
 {

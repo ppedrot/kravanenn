@@ -1,3 +1,7 @@
+use coq::checker::univ::{
+    Huniv,
+    SubstResult,
+};
 use coq::kernel::esubst::{Idx, IdxError, Lift, IdxResult};
 use core::convert::TryFrom;
 use core::nonzero::NonZero;
@@ -9,16 +13,19 @@ use ocaml::values::{
     Fix,
     Fix2,
     Ind,
+    Instance,
     Name,
     PRec,
     PUniverses,
     RDecl,
     Sort,
     SortContents,
+    Univ,
 };
+use std::borrow::{Cow};
 use std::cell::Cell;
 use std::option::{NoneError};
-use std::rc::Rc;
+use std::sync::{Arc};
 
 #[derive(Clone,Copy)]
 pub enum Info {
@@ -70,6 +77,14 @@ impl<'a> Substituend<&'a Constr> {
     }
 }
 
+impl Univ {
+    fn sort_of(&self) -> Sort {
+        if self.is_type0m() { Sort::Prop(SortContents::Null) }
+        else if self.is_type0() { Sort::Prop(SortContents::Pos) }
+        else { Sort::Type(ORef(Arc::new(self.clone()))) }
+    }
+}
+
 impl Constr {
     /// Constructions as implemented
 
@@ -113,7 +128,7 @@ impl Constr {
     }
 
     pub fn applist(self, l: Vec<Constr>) -> Constr {
-        Constr::App(ORef(Rc::from((self, Array(Rc::from(l))))))
+        Constr::App(ORef(Arc::from((self, Array(Arc::from(l))))))
     }
 
     /// Functions for dealing with Constr terms
@@ -248,7 +263,7 @@ impl Constr {
                 let (ref c, k, ref t) = **o;
                 let c = f(c, l)?;
                 let t = f(t, l)?;
-                Constr::Cast(ORef(Rc::from((c, k, t))))
+                Constr::Cast(ORef(Arc::from((c, k, t))))
             },
             Constr::Prod(ref o) => {
                 let (ref na, ref t, ref c) = **o;
@@ -256,7 +271,7 @@ impl Constr {
                 let mut l = l.clone(); // expensive
                 g(&mut l)?;
                 let c = f(c, &l)?;
-                Constr::Prod(ORef(Rc::from((na.clone(), t, c))))
+                Constr::Prod(ORef(Arc::from((na.clone(), t, c))))
             },
             Constr::Lambda(ref o) => {
                 let (ref na, ref t, ref c) = **o;
@@ -264,7 +279,7 @@ impl Constr {
                 let mut l = l.clone(); // expensive
                 g(&mut l)?;
                 let c = f(c, &l)?;
-                Constr::Lambda(ORef(Rc::from((na.clone(), t, c))))
+                Constr::Lambda(ORef(Arc::from((na.clone(), t, c))))
             },
             Constr::LetIn(ref o) => {
                 let (ref na, ref b, ref t, ref c) = **o;
@@ -273,14 +288,14 @@ impl Constr {
                 let mut l = l.clone(); // expensive
                 g(&mut l)?;
                 let c = f(c, &l)?;
-                Constr::LetIn(ORef(Rc::from((na.clone(), b, t, c))))
+                Constr::LetIn(ORef(Arc::from((na.clone(), b, t, c))))
             },
             Constr::App(ref o) => {
                 let (ref c, ref al) = **o;
                 let c = f(c, l)?;
                 // expensive -- allocates a Vec
                 let al: Result<Vec<_>, _> = al.iter().map( |x| f(x, l) ).collect();
-                Constr::App(ORef(Rc::from((c, Array(Rc::from(al?))))))
+                Constr::App(ORef(Arc::from((c, Array(Arc::from(al?))))))
             },
             // | Evar (e,al) -> Evar (e, Array.map (f l) al)
             Constr::Case(ref o) => {
@@ -289,7 +304,7 @@ impl Constr {
                 let c = f(c, l)?;
                 // expensive -- allocates a Vec
                 let bl: Result<Vec<_>, _> = bl.iter().map( |x| f(x, l) ).collect();
-                Constr::Case(ORef(Rc::from((ci.clone(), p, c, Array(Rc::from(bl?))))))
+                Constr::Case(ORef(Arc::from((ci.clone(), p, c, Array(Arc::from(bl?))))))
             },
             Constr::Fix(ref o) => {
                 let Fix(ref ln, PRec(ref lna, ref tl, ref bl)) = **o;
@@ -302,10 +317,10 @@ impl Constr {
                 }
                 // expensive -- allocates a Vec
                 let bl: Result<Vec<_>, _> = bl.iter().map( |x| f(x, &l) ).collect();
-                Constr::Fix(ORef(Rc::from(Fix(ln.clone(),
+                Constr::Fix(ORef(Arc::from(Fix(ln.clone(),
                                               PRec(lna.clone(),
-                                                   Array(Rc::from(tl?)),
-                                                   Array(Rc::from(bl?)))))))
+                                                   Array(Arc::from(tl?)),
+                                                   Array(Arc::from(bl?)))))))
             },
             Constr::CoFix(ref o) => {
                 let CoFix(ln, PRec(ref lna, ref tl, ref bl)) = **o;
@@ -318,15 +333,15 @@ impl Constr {
                 }
                 // expensive -- allocates a Vec
                 let bl: Result<Vec<_>, _> = bl.iter().map( |x| f(x, &l) ).collect();
-                Constr::CoFix(ORef(Rc::from(CoFix(ln.clone(),
+                Constr::CoFix(ORef(Arc::from(CoFix(ln.clone(),
                                                   PRec(lna.clone(),
-                                                       Array(Rc::from(tl?)),
-                                                       Array(Rc::from(bl?)))))))
+                                                       Array(Arc::from(tl?)),
+                                                       Array(Arc::from(bl?)))))))
             },
             Constr::Proj(ref o) => {
                 let (ref p, ref c) = **o;
                 let c = f(c, l)?;
-                Constr::Proj(ORef(Rc::from((p.clone(), c))))
+                Constr::Proj(ORef(Arc::from((p.clone(), c))))
             },
             // Constr::Meta(_) | Constr::Var(_) | Constr::Evar(_) => unreachable!("")
         })
@@ -539,7 +554,7 @@ impl Constr {
             (&Constr::Construct(ref o1), &Constr::Construct(ref o2)) => {
                 let PUniverses(ref i1, ref u1) = **o1;
                 let PUniverses(ref i2, ref u2) = **o2;
-                i1.idx == i2.idx && i1.ind.eq_ind_chk(&i2.ind) && u1 == u2
+                i1.idx == i2.idx && i1.ind.eq_ind_chk(&i2.ind) && u1.equal(u2)
             },
             (&Constr::Case(ref o1), &Constr::Case(ref o2)) => {
                 let (_, ref p1, ref c1, ref bl1) = **o1;
@@ -575,6 +590,86 @@ impl Constr {
         self as *const _ == n as *const _ ||
         self.compare(n, Self::eq)
     }
+
+    /// Universe substitutions
+    pub fn subst_instance(&self, subst: &Instance, tbl: &Huniv) -> SubstResult<Cow<Constr>>
+    {
+        if subst.is_empty() { Ok(Cow::Borrowed(self)) }
+        else {
+            // FIXME: We needlessly allocate in this function even if there were no changes,
+            // due to the signature of map_constr_with_binders (and then waste time deallocating
+            // all the stuff we just built after it's done).  We could get away with not
+            // performing any cloning etc. until we actually change something.
+            fn aux(t: &Constr, env: &(&Instance, &Huniv, &Cell<bool>)) -> SubstResult<Constr> {
+                let (subst, tbl, ref changed) = *env;
+                let f = |u| subst.subst_instance(u);
+                match *t {
+                    Constr::Const(ref o) => {
+                        let PUniverses(ref c, ref u) = **o;
+                        return Ok(
+                            if u.is_empty() { t.clone() }
+                            else {
+                                let u_ = f(u)?;
+                                if &**u_ as *const _ == &***u as *const _ { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    Constr::Const(ORef(Arc::from(PUniverses(c.clone(),
+                                                                            u_))))
+                                }
+                            }
+                        )
+                    },
+                    Constr::Ind(ref o) => {
+                        let PUniverses(ref i, ref u) = **o;
+                        return Ok(
+                            if u.is_empty() { t.clone() }
+                            else {
+                                let u_ = f(u)?;
+                                if &**u_ as *const _ == &***u as *const _ { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    Constr::Ind(ORef(Arc::from(PUniverses(i.clone(),
+                                                                          u_))))
+                                }
+                            }
+                        )
+                    },
+                    Constr::Construct(ref o) => {
+                        let PUniverses(ref c, ref u) = **o;
+                        return Ok(
+                            if u.is_empty() { t.clone() }
+                            else {
+                                let u_ = f(u)?;
+                                if &**u_ as *const _ == &***u as *const _ { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    Constr::Construct(ORef(Arc::from(PUniverses(c.clone(),
+                                                                                u_))))
+                                }
+                            }
+                        )
+                    },
+                    Constr::Sort(ref o) => {
+                        if let Sort::Type(ref u) = **o {
+                            return Ok({
+                                let u_ = subst.subst_universe(u, tbl)?;
+                                if u_.hequal(u) { t.clone() }
+                                else {
+                                    changed.set(true);
+                                    Constr::Sort(ORef(Arc::new(u_.sort_of())))
+                                }
+                            })
+                        }
+                    },
+                    _ => {}
+                }
+                t.map_constr_with_binders( |_| Ok(()), aux, env)
+            }
+            let changed = Cell::new(false);
+            let c_ = aux(self, &(subst, tbl, &changed))?;
+            Ok(if changed.get() { Cow::Owned(c_) } else { Cow::Borrowed(self) })
+        }
+    }
 }
 
 impl Sort {
@@ -588,7 +683,7 @@ impl Sort {
                     (SortContents::Null, SortContents::Pos) => false,
                 }
             },
-            (&Sort::Type(ref u1), &Sort::Type(ref u2)) => u1 == u2,
+            (&Sort::Type(ref u1), &Sort::Type(ref u2)) => u1.equal(u2),
             (&Sort::Prop(_), &Sort::Type(_)) => false,
             (&Sort::Type(_), &Sort::Prop(_)) => false,
         }
@@ -600,6 +695,6 @@ impl<T> PUniverses<T> {
         where F: Fn(&T, &T) -> bool,
     {
         let PUniverses(ref c1, ref u1) = *self;
-        u1 == u2 && f(c1, c2)
+        u1.equal(u2) && f(c1, c2)
     }
 }

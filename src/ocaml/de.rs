@@ -1,8 +1,9 @@
+use lazy_init::{LazyTransform};
 use ocaml::marshal::{Obj, Field, RawString, ObjRepr};
 use ocaml::votour::{Closure};
 use std::error::{self, Error as StdError};
 use std::fmt;
-use std::rc::Rc;
+use std::sync::{Arc};
 
 use serde;
 use vec_map::{VecMap};
@@ -10,13 +11,16 @@ use std::any::Any;
 use serde::de::{Error as DeError, IntoDeserializer};
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct ORef<T>(pub Rc<T>);
+pub struct ORef<T>(pub Arc<T>);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Array<T>(pub Rc<Vec<T>>);
+pub struct Array<T>(pub Arc<Vec<T>>);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct Str(pub Rc<Vec<u8>>);
+pub struct Str(pub Arc<Vec<u8>>);
+
+pub struct OLazy<T, U>(pub LazyTransform<T, U>)
+    where T: Sync, U: Sync;
 
 #[derive(Debug)]
 pub enum Error<'a> {
@@ -526,7 +530,11 @@ pub struct Seed<'s> {
     /// for two references to the same block to have different types, so once a value is set in the
     /// VecMap it should not change, and we also know its length up front; however, neither
     /// property seems to make it worth using something other than a VecMap.
-    rust_memory: VecMap<Rc<Any>>,
+    ///
+    /// FIXME: We need the extra layer of boxing for an incredibly bad reason (Arc doesn't
+    /// implement downcast, because there's no implementation for it, for reasons that aren't clear
+    /// to me).
+    rust_memory: VecMap<Box<Any>>,
     /// OCaml's memory, represented as an array of blocks.  Should have the same length as the
     /// VecMap.
     ocaml_memory: &'s [Obj],
@@ -544,6 +552,7 @@ impl<'s> Seed<'s> {
 impl<'de, 's, T> serde::de::DeserializeState<'de, Seed<'s>> for ORef<T>
     where T: 'static,
           T: serde::de::DeserializeState<'de, Seed<'s>>,
+          T: Send + Sync,
 {
     fn deserialize_state<'seed, D>(seed: &'seed mut Seed<'s>, deserializer: D) -> Result<Self, D::Error>
     where
@@ -557,10 +566,11 @@ impl<'de, 's, T> serde::de::DeserializeState<'de, Seed<'s>> for ORef<T>
         if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
             // Occupied entries have been visited before, so we just need to confirm that we have
             // the same time now that we did last time.
-            match o.downcast::<T>() {
+            match o.downcast::<Arc<T>>() {
                 Ok(a) => {
-                    seed.rust_memory.insert(p as usize, a.clone());
-                    return Ok(ORef(a))
+                    let a_ = (*a).clone();
+                    seed.rust_memory.insert(p as usize, a);
+                    return Ok(ORef(a_))
                 },
                 Err(a) => {
                     // println!("Error ORef {:?} with typeid {:?}", p, ::std::any::TypeId::of::<T>());
@@ -577,14 +587,14 @@ impl<'de, 's, T> serde::de::DeserializeState<'de, Seed<'s>> for ORef<T>
         // cycle detection would require keeping some sort of placeholder in the entry (of
         // the wrong type) to make sure we panicked if we came to it a second time.
         let res: T = serde::de::DeserializeState::deserialize_state(&mut *seed, deserializer).map_err(D::Error::custom)?;
-        let res: Rc<T> = Rc::from(res);
+        let res: Arc<T> = Arc::from(res);
         // println!("ORef: {:?}", ::std::mem::size_of::<T>());
         // Hopefully our will_box rule combined with OCaml not type punning and no cycles in .vo
         // files means these insertions always trend monotonically towards larger values (so we
         // don't allocate multiple times for the same location).  It's hard to guarantee, though.
         if p >= 0 && !will_box {
-            let res_: Rc<T> = res.clone();
-            seed.rust_memory.insert(p as usize, res_);
+            let res_: Arc<T> = res.clone();
+            seed.rust_memory.insert(p as usize, Box::new(res_));
         }
         // println!("The memory location was somehow mapped to a type before we finished deserializing its contents");
         Ok(ORef(res))
@@ -610,10 +620,11 @@ impl<'de, 's> serde::de::DeserializeState<'de, Seed<'s>> for Str
         if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
             // Occupied entries have been visited before, so we just need to confirm that we have
             // the same time now that we did last time.
-            match o.downcast::<Vec<u8>>() {
+            match o.downcast::<Arc<Vec<u8>>>() {
                 Ok(a) => {
-                    seed.rust_memory.insert(p as usize, a.clone());
-                    return Ok(Str(a))
+                    let a_ = (*a).clone();
+                    seed.rust_memory.insert(p as usize, a);
+                    return Ok(Str(a_))
                 },
                 Err(a) => {
                     seed.rust_memory.insert(p as usize, a);
@@ -646,14 +657,14 @@ impl<'de, 's> serde::de::DeserializeState<'de, Seed<'s>> for Str
         // cycle detection would require keeping some sort of placeholder in the entry (of
         // the wrong type) to make sure we panicked if we came to it a second time.
         let res: Vec<u8> = serde::de::Deserializer::deserialize_bytes(deserializer, RawStringVisitor).map_err(D::Error::custom)?;
-        let res: Rc<Vec<u8>> = Rc::from(res);
+        let res: Arc<Vec<u8>> = Arc::from(res);
         // println!("Str: {:?}", ::std::mem::size_of::<T>());
         // Hopefully our will_box rule combined with OCaml not type punning and no cycles in .vo
         // files means these insertions always trend monotonically towards larger values (so we
         // don't allocate multiple times for the same location).  It's hard to guarantee, though.
         if p >= 0 && !will_box {
             let res_ = res.clone();
-            seed.rust_memory.insert(p as usize, res_);
+            seed.rust_memory.insert(p as usize, Box::new(res_));
         }
         /*    Err(D::Error::custom::<String>("The memory location was somehow mapped to a type before we finished deserializing its contents".into()))
         } else {
@@ -719,7 +730,7 @@ impl<'de, 's> serde::de::DeserializeState<'de, Seed<'s>> for Str
         // cycle detection would require keeping some sort of placeholder in the entry (of
         // the wrong type) to make sure we panicked if we came to it a second time.
         let res: Vec<u8> = serde::de::Deserializer::deserialize_bytes(deserializer, RawStringVisitor).map_err(D::Error::custom)?;
-        let res: Rc<Vec<u8>> = Rc::from(res);
+        let res: Arc<Vec<u8>> = Arc::from(res);
         let res_ = res.clone();
         // println!("Str: {:?}", ::std::mem::size_of::<T>());
         let res = if p >= 0 && seed.rust_memory.insert(p as usize, res_).is_some() {
@@ -736,6 +747,7 @@ impl<'de, 's> serde::de::DeserializeState<'de, Seed<'s>> for Str
 impl<'s, 'de, T> serde::de::DeserializeState<'de, Seed<'s>> for Array<T>
     where T: 'static,
           T: serde::de::DeserializeState<'de, Seed<'s>>,
+          T: Send + Sync,
           // Seed<'s>: serde::de::DeserializeSeed<'de>,
 {
     fn deserialize_state<'seed, D>(seed: &'seed mut Seed<'s>, deserializer: D) -> Result<Self, D::Error>
@@ -751,10 +763,11 @@ impl<'s, 'de, T> serde::de::DeserializeState<'de, Seed<'s>> for Array<T>
         if let Some(o) = if p >= 0 { seed.rust_memory.remove(p as usize) } else { None } {
             // Occupied entries have been visited before, so we just need to confirm that we have
             // the same time now that we did last time.
-            match o.downcast::<Vec<T>>() {
+            match o.downcast::<Arc<Vec<T>>>() {
                 Ok(a) => {
-                    seed.rust_memory.insert(p as usize, a.clone());
-                    return Ok(Array(a))
+                    let a_ = (*a).clone();
+                    seed.rust_memory.insert(p as usize, a);
+                    return Ok(Array(a_))
                 },
                 Err(a) => {
                     /* println!("Error with typeid {:?}", ::std::any::TypeId::of::<T>());
@@ -771,7 +784,7 @@ impl<'s, 'de, T> serde::de::DeserializeState<'de, Seed<'s>> for Array<T>
         // cycle detection would require keeping some sort of placeholder in the entry (of
         // the wrong type) to make sure we panicked if we came to it a second time.
         let res: Vec<T> = serde::de::DeserializeState::deserialize_state(&mut *seed, deserializer).map_err(D::Error::custom)?;
-        let res: Rc<Vec<T>> = Rc::from(res);
+        let res: Arc<Vec<T>> = Arc::from(res);
         // println!("Array: {:?}", ::std::mem::size_of::<T>());
         // Insert the vector slice with the deserialized sequence, suitably cast, into the vacant entry.
         // Note that if we had a cycle, this strategy will not necessarily terminate...
@@ -782,7 +795,7 @@ impl<'s, 'de, T> serde::de::DeserializeState<'de, Seed<'s>> for Array<T>
         // don't allocate multiple times for the same location).  It's hard to guarantee, though.
         if p >= 0 && !will_box {
             let res_ = res.clone();
-            seed.rust_memory.insert(p as usize, res_);
+            seed.rust_memory.insert(p as usize, Box::new(res_));
             // Err(D::Error::custom::<String>("The memory location was somehow mapped to a type before we finished deserializing its contents".into()))
         }
         /* println!("ARef {:?} TypeId {:?}", p, ::std::any::TypeId::of::<T>()); */
@@ -813,6 +826,15 @@ impl ::std::ops::Deref for Str {
     }
 }
 
+impl<T, U> ::std::ops::Deref for OLazy<T, U>
+    where T: Sync, U: Sync
+{
+    type Target = LazyTransform<T, U>;
+    fn deref(&self) -> &LazyTransform<T, U> {
+        &self.0
+    }
+}
+
 impl<'s, 'de> serde::de::DeserializeState<'de, Seed<'s>> for !
 {
     fn deserialize_state<'seed, D>(_: &'seed mut Seed<'s>, _: D) -> Result<Self, D::Error>
@@ -823,8 +845,24 @@ impl<'s, 'de> serde::de::DeserializeState<'de, Seed<'s>> for !
     }
 }
 
+impl<'de, T, U> serde::de::DeserializeState<'de, Seed<'de>> for OLazy<T, U>
+    where T: Send + Sync + 'static,
+          U: Sync,
+          T: serde::de::DeserializeState<'de, Seed<'de>>,
+{
+    fn deserialize_state<'seed, D>(seed: &'seed mut Seed<'de>,
+                                   deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+    {
+        // Lazy: we just deserialize T, then stick it in a LazyTransform.
+        let value: T = T::deserialize_state(seed, deserializer)?;
+        Ok(OLazy(LazyTransform::new(value)))
+    }
+}
+
 pub fn from_obj_state<'a, 'de, 'seed, S, T>(obj: &'a ObjRepr, seed: &'seed mut S) -> Result<T, Error<'a>>
-    where T: serde::de::DeserializeState<'de, S>, T: 'static,
+    where T: serde::de::DeserializeState<'de, S>, T: 'static, T: Send + Sync,
 {
     let ObjRepr { entry, ref memory} = *obj;
     let deserializer = Deserializer { closure: Closure(entry, &*memory), will_box: false };

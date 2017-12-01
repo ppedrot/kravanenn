@@ -1,9 +1,13 @@
 use coq::checker::univ::{
+    Huniv,
+    SubstError,
     Universes,
 };
 use coq::kernel::names::{
     CMapEnv,
+    KnKey,
     KnMap,
+    KnUser,
     MindMapEnv,
     // MpMap,
     MutInd,
@@ -25,35 +29,17 @@ use ocaml::values::{
     RDecl,
     // VoDigest,
 };
-use take_mut;
-
-
-/// Used to represent a computation that is only ever applied once.
-///
-/// This is useful because it lets us remember whether we've checked that a constant was already
-/// evaluated in a way that Rust's type system understands, therefore letting us share the lazily
-/// initialized version freely at lifetime 'a, without making us use separate maps or something
-/// for the immutable and mutable versions, or requiring us to modify the structures used by OCaml.
-/// The only negative is that it could be a bit wasteful of space (since this doesn't fit in a word
-/// according to Rust, and we probably can't make it use pointer tagging without unsafe code).  We
-/// can fix that later if we must, though.
-///
-/// (A way to potentially make this nicer would be to use Serde to allow us to put this enum
-/// directly on the CstrDef, rather than making us freeze the entire Cb, which we don't need).
-enum LazyRef<'a, T> where T: 'a {
-    Owned(&'a mut T),
-    Borrowed(&'a T),
-}
+use std::borrow::Cow;
 
 /// Environments
 
 #[derive(Default)]
 pub struct Globals<'g> {
-    /// Invariant: always LazyRef::Owned until constant_value is called for the first time.
-    /// (never inserted as LazyRef::Borrowed)
-    constants: CMapEnv<LazyRef<'g, Cb>>,
+    constants: CMapEnv<'g, &'g Cb>,
     inductives: MindMapEnv<'g, &'g IndPack>,
-    inductives_eq: KnMap<Kn>,
+    inductives_eq: KnMap<'g, Kn>,
+    /// Hash-consed universe table.
+    univ_hcons_tbl: Huniv,
     // modules: MpMap<Module>,
     // modtypes: MpMap<ModType>,
 }
@@ -82,6 +68,7 @@ pub struct Env<'b, 'g> where 'g: 'b {
 pub enum ConstEvaluationResult {
     NoBody,
     Opaque,
+    Subst(SubstError),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -92,12 +79,9 @@ pub enum EnvError {
 
 pub type EnvResult<T> = Result<T, EnvError>;
 
-impl<'a, T> AsRef<T> for LazyRef<'a, T> {
-    fn as_ref(&self) -> &T {
-        match *self {
-            LazyRef::Owned(ref v) => &**v,
-            LazyRef::Borrowed(ref v) => &**v,
-        }
+impl ::std::convert::From<SubstError> for ConstEvaluationResult {
+    fn from(e: SubstError) -> Self {
+        ConstEvaluationResult::Subst(e)
     }
 }
 
@@ -105,70 +89,42 @@ impl<'g> Globals<'g> where {
     /// Constants
 
     /// Global constants
-    pub fn lookup_constant(&self, c: &Cst) -> Option<&Cb> {
-        self.constants.get(c).map( |c| c.as_ref() )
+    pub fn lookup_constant(&self, c: &Cst) -> Option<&'g Cb> {
+        self.constants.get(&KnUser(c)).map( |&cb| cb )
     }
 
-    fn lookup_constant_mut(&mut self, c: &Cst) -> Option<&mut LazyRef<'g, Cb>> {
-        self.constants.get_mut(c)
-    }
-
-    pub fn constant_value(&mut self, o: &PUniverses<Cst>) ->
-        Option<Result<&'g Constr, ConstEvaluationResult>>
+    pub fn constant_value(&self, o: &PUniverses<Cst>) ->
+        Option<Result<Cow<'g, Constr>, ConstEvaluationResult>>
     {
-        let PUniverses(ref kn, ref _u) = *o;
-        self.lookup_constant_mut(kn)
-            .and_then( |rf| {
-                // NB: I think there's a way to solve this problem without using take_mut (or
-                // RefCell, which we are trying to avoid altogether), but it would be worse in
-                // most ways except that it doesn't abort on panic, which I don't care about
-                // The method involves storing a dummy &'g Cb in the Env structure and would
-                // probably result in a somewhat annoying interface (more importantly, it would
-                // still probably result in incorrect results if a panic was caught while the
-                // HashMap was still alive, though if people are actually paying attention to
-                // UnwindSafe, this should not be a problem).
-                // Gory details available on request.
-                let mut b = None;
-                take_mut::take(rf, |rf|
-                    LazyRef::Borrowed(match rf {
-                        LazyRef::Owned(cb) => {
-                            if let CstDef::Def(ref mut l_body) = cb.body {
+        let PUniverses(ref kn, ref u) = *o;
+        self.lookup_constant(kn)
+            .and_then( |cb| {
+                Some(match cb.body {
+                    CstDef::Def(ref l_body) => {
+                        // l_body is lazily initialized, and this is the only place that tries to
+                        // force it.
+                        let b = l_body.get_or_create( |mut l_body| {
+                            l_body.force_constr();
+                            if cb.polymorphic {
+                                // FIXME: Why do we do this twice?
                                 l_body.force_constr();
-                                if cb.polymorphic {
-                                    unimplemented!("Universe substitution not yet implemented")
-                                    // u.subst(l_body.force());
-                                }
-                            };
-                            // Shouldn't have to do this as two match statement, but do in order to
-                            // satisfy the borrow checker.
-                            b = Some(match cb.body {
-                                CstDef::Def(ref l_body) => {
-                                    Ok(&*l_body.value)
-                                },
-                                CstDef::OpaqueDef(_) =>
-                                    Err(ConstEvaluationResult::NoBody),
-                                CstDef::Undef(_) =>
-                                    Err(ConstEvaluationResult::Opaque),
-                            });
-                            &*cb
-                        },
-                        LazyRef::Borrowed(cb) => {
-                            b = Some(match cb.body {
-                                CstDef::Def(ref l_body) => {
-                                    // By our invariant, if we are Borrowed l_body was already
-                                    // forced, so we know we can just take the value.
-                                    Ok(&*l_body.value)
-                                },
-                                CstDef::OpaqueDef(_) =>
-                                    Err(ConstEvaluationResult::NoBody),
-                                CstDef::Undef(_) =>
-                                    Err(ConstEvaluationResult::Opaque),
-                            });
-                            &*cb
+                            }
+                            l_body.value
+                        });
+                        if cb.polymorphic {
+                            match b.subst_instance(u, &self.univ_hcons_tbl) {
+                                Ok(b) => Ok(b),
+                                Err(e) => Err(ConstEvaluationResult::Subst(e)),
+                            }
+                        } else {
+                            Ok(Cow::Borrowed(&**b))
                         }
-                    })
-                );
-                b
+                    },
+                    CstDef::OpaqueDef(_) =>
+                        Err(ConstEvaluationResult::NoBody),
+                    CstDef::Undef(_) =>
+                        Err(ConstEvaluationResult::Opaque),
+                })
             })
     }
 
@@ -187,17 +143,17 @@ impl<'g> Globals<'g> where {
 
     /// Mutual Inductives
     fn scrape_mind<'a>(&'a self, kn: &'a Kn) -> &'a Kn {
-        self.inductives_eq.get(kn).unwrap_or(kn)
+        self.inductives_eq.get(&KnKey(kn)).unwrap_or(kn)
     }
 
     pub fn mind_equiv(&self, ind1: &Ind, ind2: &Ind) -> bool {
         ind1.pos == ind2.pos &&
-        self.scrape_mind(ind1.name.user()) == self.scrape_mind(ind2.name.user())
+        self.scrape_mind(ind1.name.user()).equal(self.scrape_mind(ind2.name.user()))
     }
 
     pub fn lookup_mind(&self, kn: &MutInd) -> Option<&'g IndPack>
     {
-        self.inductives.get(kn).map( |&v| v )
+        self.inductives.get(&KnUser(kn)).map( |&v| v )
     }
 }
 
